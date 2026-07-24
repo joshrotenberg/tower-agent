@@ -20,7 +20,7 @@ pub mod error;
 pub mod mcp;
 pub mod params;
 
-pub use backend::{Backend, BackendError, Outcome, StubBackend};
+pub use backend::{Backend, BackendError, Event, Outcome, StubBackend};
 pub use config::{AgentDef, Config, Defaults};
 pub use error::RunError;
 pub use mcp::{Server, router};

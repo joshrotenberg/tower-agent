@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use tower_mcp::extract::{Json, State};
-use tower_mcp::{CallToolResult, Error, McpRouter, NoParams, Tool, ToolBuilder};
+use tokio::sync::mpsc::UnboundedSender;
+use tower_mcp::extract::{Context, Json, State};
+use tower_mcp::{CallToolResult, Error, McpRouter, NoParams, TaskSupportMode, Tool, ToolBuilder};
 
-use crate::backend::{Backend, Outcome};
+use crate::backend::{Backend, Event, Outcome};
 use crate::config::Config;
 use crate::error::RunError;
 use crate::params::Call;
@@ -36,11 +37,9 @@ impl Server {
         self.config.agent_names().cloned().collect()
     }
 
-    /// Resolve a call against config and run it through the backend. This is the
-    /// atom; the MCP `prompt` tool is a thin wrapper over it. The call is
-    /// validated first: a named agent must exist, and the prompt must not be
+    /// Validate a call: a named agent must exist, and the prompt must not be
     /// empty.
-    pub async fn run(&self, call: Call) -> Result<Outcome, RunError> {
+    fn validate(&self, call: &Call) -> Result<(), RunError> {
         if call.prompt.trim().is_empty() {
             return Err(RunError::EmptyPrompt);
         }
@@ -49,8 +48,28 @@ impl Server {
         {
             return Err(RunError::UnknownAgent(agent.clone()));
         }
+        Ok(())
+    }
+
+    /// Resolve a call against config and run it through the backend. This is the
+    /// atom; the MCP `prompt` tool is a thin wrapper over it.
+    pub async fn run(&self, call: Call) -> Result<Outcome, RunError> {
+        self.validate(&call)?;
         let params = self.config.resolve(call);
         Ok(self.backend.run(&params).await?)
+    }
+
+    /// Like [`Server::run`], but emitting incremental [`Event`]s to `events` as
+    /// the backend produces them. The caller opts into streaming; a backend that
+    /// does not stream simply sends nothing and returns the outcome.
+    pub async fn run_streaming(
+        &self,
+        call: Call,
+        events: UnboundedSender<Event>,
+    ) -> Result<Outcome, RunError> {
+        self.validate(&call)?;
+        let params = self.config.resolve(call);
+        Ok(self.backend.run_streaming(&params, events).await?)
     }
 
     /// Build the MCP router that exposes this server.
@@ -84,18 +103,54 @@ fn prompt_tool(server: Server) -> Tool {
     ToolBuilder::new("prompt")
         .description(
             "Run a prompt. Requires `prompt`; `agent` selects a profile of defaults; any other \
-             backend parameter (system, model, effort, allowed_tools, cwd, session) is optional",
+             backend parameter (system, model, effort, allowed_tools, cwd, session) is optional. \
+             May be called as a task for long runs, and streams incremental output when the call \
+             carries a progress token",
         )
+        // The prompt is long-running: let a client run it as a task (returning a
+        // task id to poll, wait on, or cancel) instead of blocking. Optional, so
+        // a simple client can still call it synchronously.
+        .task_support(TaskSupportMode::Optional)
         .extractor_handler(
             server,
-            |State(server): State<Server>, Json(call): Json<Call>| async move {
-                match server.run(call).await {
-                    Ok(outcome) => CallToolResult::from_serialize(&outcome),
-                    Err(e) => Err(Error::tool(e.to_string())),
+            |State(server): State<Server>, ctx: Context, Json(call): Json<Call>| async move {
+                // Stream only when the caller opted in with a progress token;
+                // otherwise take the cheaper non-streaming path.
+                if ctx.progress_token().is_some() {
+                    run_streamed(server, ctx, call).await
+                } else {
+                    match server.run(call).await {
+                        Ok(outcome) => CallToolResult::from_serialize(&outcome),
+                        Err(e) => Err(Error::tool(e.to_string())),
+                    }
                 }
             },
         )
         .build()
+}
+
+/// Run a call with streaming: forward each backend [`Event`] to the caller as a
+/// progress notification, then return the final outcome. The backend runs on its
+/// own task so events can be drained as they arrive.
+async fn run_streamed(server: Server, ctx: Context, call: Call) -> Result<CallToolResult, Error> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    let handle = tokio::spawn(async move { server.run_streaming(call, tx).await });
+
+    let mut n = 0.0f64;
+    while let Some(event) = rx.recv().await {
+        n += 1.0;
+        let message = match event {
+            Event::TextDelta(t) => t,
+            Event::Status(s) => s,
+        };
+        ctx.report_progress(n, None, Some(&message)).await;
+    }
+
+    match handle.await {
+        Ok(Ok(outcome)) => CallToolResult::from_serialize(&outcome),
+        Ok(Err(e)) => Err(Error::tool(e.to_string())),
+        Err(e) => Err(Error::tool(format!("run task failed: {e}"))),
+    }
 }
 
 fn agents_tool(server: Server) -> Tool {
@@ -125,7 +180,35 @@ mod tests {
     use super::*;
     use crate::backend::StubBackend;
     use serde_json::{Value, json};
+    use tower_mcp::ServerNotification;
     use tower_mcp::testing::TestClient;
+
+    /// A backend that streams a few events then finishes, for exercising the
+    /// streaming path deterministically.
+    struct StreamBackend;
+
+    #[async_trait::async_trait]
+    impl Backend for StreamBackend {
+        async fn run(&self, _params: &crate::Params) -> Result<Outcome, crate::BackendError> {
+            Ok(Outcome {
+                text: "hello".into(),
+                session: Some("s1".into()),
+            })
+        }
+        async fn run_streaming(
+            &self,
+            _params: &crate::Params,
+            events: tokio::sync::mpsc::UnboundedSender<Event>,
+        ) -> Result<Outcome, crate::BackendError> {
+            let _ = events.send(Event::Status("starting".into()));
+            let _ = events.send(Event::TextDelta("hel".into()));
+            let _ = events.send(Event::TextDelta("lo".into()));
+            Ok(Outcome {
+                text: "hello".into(),
+                session: Some("s1".into()),
+            })
+        }
+    }
 
     fn server() -> Server {
         let config = Config::parse(
@@ -269,5 +352,119 @@ mod tests {
         let _err: Value = c
             .call_tool_expect_error("prompt", json!({ "agent": "tester" }))
             .await;
+    }
+
+    #[tokio::test]
+    async fn run_streaming_forwards_events_and_returns_outcome() {
+        let server = Server::new(Config::default(), Arc::new(StreamBackend));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = server
+            .run_streaming(
+                Call {
+                    prompt: "go".into(),
+                    ..Default::default()
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.text, "hello");
+        let mut got = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            got.push(ev);
+        }
+        assert_eq!(got.len(), 3, "three events streamed");
+    }
+
+    #[tokio::test]
+    async fn stub_streaming_sends_no_events_but_returns_outcome() {
+        // The default streaming impl does not stream: no events, but the outcome
+        // still comes back.
+        let server = Server::new(Config::default(), Arc::new(StubBackend));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = server
+            .run_streaming(
+                Call {
+                    prompt: "go".into(),
+                    ..Default::default()
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err(), "stub streams nothing");
+        assert!(outcome.text.contains("go"));
+    }
+
+    #[tokio::test]
+    async fn prompt_tool_advertises_task_support() {
+        let mut c = client().await;
+        let tools = c.list_tools().await;
+        let prompt = tools.iter().find(|t| t["name"] == "prompt").unwrap();
+        // Optional: a client MAY run it as a task, or call it synchronously.
+        assert_eq!(prompt["execution"]["taskSupport"], "optional");
+    }
+
+    #[tokio::test]
+    async fn prompt_can_run_as_a_task() {
+        let mut c = client().await;
+        // A task-augmented call returns a task handle immediately (async), not
+        // the inline result. This is the long-running execution model.
+        let created = c
+            .send_request(
+                "tools/call",
+                Some(json!({ "name": "prompt", "arguments": { "prompt": "go" }, "task": {} })),
+            )
+            .await;
+        assert_eq!(created["resultType"], "task", "resp: {created}");
+        assert!(
+            created["task"]["taskId"].as_str().is_some(),
+            "task-augmented call should return a task handle: {created}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_emits_progress_only_with_a_token() {
+        // With a progress token, deltas arrive as progress notifications.
+        let mut client = TestClient::from_router(
+            Server::new(Config::default(), Arc::new(StreamBackend)).router(),
+        );
+        client.initialize().await;
+        let _ = client
+            .send_request(
+                "tools/call",
+                Some(json!({
+                    "name": "prompt",
+                    "arguments": { "prompt": "go" },
+                    "_meta": { "progressToken": "p1" }
+                })),
+            )
+            .await;
+        let messages: Vec<String> = client
+            .drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                ServerNotification::Progress(p) => p.message,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages, vec!["starting", "hel", "lo"]);
+
+        // Without a token, no progress notifications are sent.
+        let mut plain = TestClient::from_router(
+            Server::new(Config::default(), Arc::new(StreamBackend)).router(),
+        );
+        plain.initialize().await;
+        let _ = plain
+            .send_request(
+                "tools/call",
+                Some(json!({ "name": "prompt", "arguments": { "prompt": "go" } })),
+            )
+            .await;
+        let any_progress = plain
+            .drain_notifications()
+            .into_iter()
+            .any(|n| matches!(n, ServerNotification::Progress(_)));
+        assert!(!any_progress, "no token means no progress");
     }
 }
