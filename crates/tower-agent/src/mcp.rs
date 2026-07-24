@@ -121,53 +121,110 @@ mod tests {
             r#"
             [defaults]
             model = "sonnet"
+            effort = "medium"
+            cwd = "/repo"
 
             [agents.tester]
             system = "You run the tests."
             model = "haiku"
+            allowed_tools = ["Bash(cargo test:*)"]
             "#,
         )
         .unwrap();
         Server::new(config, Arc::new(StubBackend))
     }
 
-    #[tokio::test]
-    async fn agents_lists_configured() {
+    async fn client() -> TestClient {
         let mut client = TestClient::from_router(server().router());
         client.initialize().await;
+        client
+    }
 
-        let agents: Vec<Value> = client.call_tool_typed("agents", json!({})).await;
+    /// Run the `prompt` tool and return the resolved [`Params`] the stub echoed.
+    async fn resolved(client: &mut TestClient, args: Value) -> Value {
+        let outcome: Value = client.call_tool_typed("prompt", args).await;
+        let text = outcome["text"].as_str().expect("outcome.text");
+        serde_json::from_str(text).expect("stub echoes resolved params as json")
+    }
+
+    #[tokio::test]
+    async fn agents_lists_configured() {
+        let agents: Vec<Value> = client().await.call_tool_typed("agents", json!({})).await;
         assert_eq!(agents[0]["name"], "tester");
         assert_eq!(agents[0]["model"], "haiku");
         assert_eq!(agents[0]["has_system"], true);
     }
 
     #[tokio::test]
-    async fn prompt_runs_with_agent_defaults() {
-        let mut client = TestClient::from_router(server().router());
-        client.initialize().await;
-
-        // Selecting the agent pulls its model (haiku) into the resolved params,
-        // which the stub backend echoes back.
-        let outcome: Value = client
-            .call_tool_typed("prompt", json!({ "agent": "tester", "prompt": "go" }))
-            .await;
-        let text = outcome["text"].as_str().unwrap();
-        assert!(text.contains("haiku"), "text was: {text}");
-        assert!(text.contains("go"), "text was: {text}");
+    async fn agent_defaults_fill_the_call() {
+        let mut c = client().await;
+        let p = resolved(&mut c, json!({ "agent": "tester", "prompt": "go" })).await;
+        assert_eq!(p["prompt"], "go");
+        assert_eq!(p["system"], "You run the tests.");
+        assert_eq!(p["model"], "haiku"); // agent beats the sonnet default
+        assert_eq!(p["effort"], "medium"); // falls through to the default
+        assert_eq!(p["cwd"], "/repo"); // from the default
+        assert_eq!(p["allowed_tools"][0], "Bash(cargo test:*)");
     }
 
     #[tokio::test]
-    async fn prompt_override_beats_agent() {
-        let mut client = TestClient::from_router(server().router());
-        client.initialize().await;
+    async fn call_overrides_every_field() {
+        let mut c = client().await;
+        let p = resolved(
+            &mut c,
+            json!({
+                "agent": "tester",
+                "prompt": "go",
+                "system": "custom",
+                "model": "opus",
+                "effort": "high",
+                "cwd": "/elsewhere",
+                "allowed_tools": ["Read"],
+                "session": "s-42"
+            }),
+        )
+        .await;
+        assert_eq!(p["system"], "custom");
+        assert_eq!(p["model"], "opus");
+        assert_eq!(p["effort"], "high");
+        assert_eq!(p["cwd"], "/elsewhere");
+        assert_eq!(p["allowed_tools"][0], "Read");
+        assert_eq!(p["session"], "s-42");
+    }
 
-        let outcome: Value = client
-            .call_tool_typed(
-                "prompt",
-                json!({ "agent": "tester", "prompt": "go", "model": "opus" }),
-            )
+    #[tokio::test]
+    async fn no_agent_uses_server_defaults_only() {
+        let mut c = client().await;
+        let p = resolved(&mut c, json!({ "prompt": "go" })).await;
+        assert_eq!(p["model"], "sonnet");
+        assert_eq!(p["effort"], "medium");
+        assert!(p["system"].is_null());
+        assert!(p["allowed_tools"].is_null());
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_falls_back_to_defaults() {
+        let mut c = client().await;
+        let p = resolved(&mut c, json!({ "agent": "nope", "prompt": "go" })).await;
+        assert_eq!(p["model"], "sonnet");
+        assert!(p["system"].is_null());
+    }
+
+    #[tokio::test]
+    async fn session_round_trips_through_outcome() {
+        let mut c = client().await;
+        let outcome: Value = c
+            .call_tool_typed("prompt", json!({ "prompt": "go", "session": "s-7" }))
             .await;
-        assert!(outcome["text"].as_str().unwrap().contains("opus"));
+        assert_eq!(outcome["session"], "s-7");
+    }
+
+    #[tokio::test]
+    async fn prompt_is_required() {
+        let mut c = client().await;
+        // Missing the required `prompt` field must be a tool error, not a run.
+        let _err: Value = c
+            .call_tool_expect_error("prompt", json!({ "agent": "tester" }))
+            .await;
     }
 }
