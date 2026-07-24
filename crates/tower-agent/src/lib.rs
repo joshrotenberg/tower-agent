@@ -16,10 +16,12 @@
 
 pub mod backend;
 pub mod config;
+pub mod error;
 pub mod mcp;
 pub mod params;
 
 pub use backend::{Backend, BackendError, Outcome, StubBackend};
 pub use config::{AgentDef, Config, Defaults};
+pub use error::RunError;
 pub use mcp::{Server, router};
 pub use params::{Call, Params};

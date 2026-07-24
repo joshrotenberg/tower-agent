@@ -50,6 +50,9 @@ pub fn build_query(params: &Params) -> QueryCommand {
     if let Some(system) = &params.system {
         cmd = cmd.system_prompt(system);
     }
+    if let Some(append) = &params.append_system {
+        cmd = cmd.append_system_prompt(append);
+    }
     if let Some(model) = &params.model {
         cmd = cmd.model(model);
     }
@@ -59,10 +62,23 @@ pub fn build_query(params: &Params) -> QueryCommand {
     if let Some(session) = &params.session {
         cmd = cmd.resume(session);
     }
+    if let Some(turns) = params.max_turns {
+        cmd = cmd.max_turns(turns);
+    }
     if let Some(tools) = &params.allowed_tools
         && !tools.is_empty()
     {
         cmd = cmd.allowed_tools(tools.iter().cloned());
+    }
+    if let Some(tools) = &params.disallowed_tools
+        && !tools.is_empty()
+    {
+        cmd = cmd.disallowed_tools(tools.iter().cloned());
+    }
+    if let Some(dirs) = &params.add_dirs {
+        for dir in dirs {
+            cmd = cmd.add_dir(dir);
+        }
     }
     cmd
 }
@@ -71,7 +87,11 @@ pub fn build_query(params: &Params) -> QueryCommand {
 impl Backend for ClaudeBackend {
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
         let cwd = params.cwd.clone().unwrap_or_else(|| ".".to_string());
-        let mut builder = Claude::builder().working_dir(cwd).timeout(self.timeout);
+        let timeout = params
+            .timeout
+            .map(Duration::from_secs)
+            .unwrap_or(self.timeout);
+        let mut builder = Claude::builder().working_dir(cwd).timeout(timeout);
         // Each agent may run in its own environment. Auth does not inherit into a
         // fresh CLAUDE_CONFIG_DIR, so an isolated one must be provisioned a token.
         if let Some(dir) = &params.config_dir {
@@ -111,8 +131,7 @@ mod tests {
             effort: Some("high".into()),
             allowed_tools: Some(vec!["Bash(cargo test:*)".into()]),
             cwd: Some("/repo".into()),
-            session: None,
-            config_dir: None,
+            ..Default::default()
         }
     }
 
@@ -156,6 +175,21 @@ mod tests {
         p.session = Some("sess-123".into());
         let rendered = build_query(&p).to_command_string(&fake_claude());
         assert!(rendered.contains("sess-123"), "{rendered}");
+    }
+
+    #[test]
+    fn maps_append_system_disallowed_add_dirs_and_max_turns() {
+        let mut p = params();
+        p.append_system = Some("be brief".into());
+        p.disallowed_tools = Some(vec!["Bash(rm:*)".into()]);
+        p.add_dirs = Some(vec!["/shared".into(), "/data".into()]);
+        p.max_turns = Some(4);
+        let rendered = build_query(&p).to_command_string(&fake_claude());
+        assert!(rendered.contains("be brief"), "{rendered}");
+        assert!(rendered.contains("Bash(rm"), "{rendered}");
+        assert!(rendered.contains("/shared"), "{rendered}");
+        assert!(rendered.contains("/data"), "{rendered}");
+        assert!(rendered.contains('4'), "{rendered}");
     }
 
     // Live smoke test: needs the claude CLI and auth. Run with:

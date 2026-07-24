@@ -28,7 +28,10 @@ pub struct Config {
 pub struct Defaults {
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub add_dirs: Option<Vec<String>>,
+    pub max_turns: Option<u32>,
     pub cwd: Option<String>,
+    pub timeout: Option<u64>,
     /// A shared environment (`CLAUDE_CONFIG_DIR`) unless an agent overrides it.
     pub config_dir: Option<String>,
 }
@@ -42,7 +45,11 @@ pub struct AgentDef {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
+    pub disallowed_tools: Option<Vec<String>>,
+    pub add_dirs: Option<Vec<String>>,
+    pub max_turns: Option<u32>,
     pub cwd: Option<String>,
+    pub timeout: Option<u64>,
     /// This agent's own environment (`CLAUDE_CONFIG_DIR`).
     pub config_dir: Option<String>,
 }
@@ -64,13 +71,21 @@ impl Config {
         self.agents.keys()
     }
 
+    /// Whether an agent by this name is configured.
+    pub fn has_agent(&self, name: &str) -> bool {
+        self.agents.contains_key(name)
+    }
+
     /// Resolve a call into the parameters a backend runs: the call over the
-    /// selected agent's defaults over the server defaults.
+    /// selected agent's defaults over the server defaults. An unknown agent name
+    /// contributes no defaults; callers that require the agent to exist should
+    /// check [`Config::has_agent`] first (the server does).
     pub fn resolve(&self, call: Call) -> Params {
         let agent = call.agent.as_ref().and_then(|a| self.agents.get(a));
         Params {
             prompt: call.prompt,
             system: call.system.or_else(|| agent.and_then(|a| a.system.clone())),
+            append_system: call.append_system,
             model: call
                 .model
                 .or_else(|| agent.and_then(|a| a.model.clone()))
@@ -82,10 +97,25 @@ impl Config {
             allowed_tools: call
                 .allowed_tools
                 .or_else(|| agent.and_then(|a| a.allowed_tools.clone())),
+            disallowed_tools: call
+                .disallowed_tools
+                .or_else(|| agent.and_then(|a| a.disallowed_tools.clone())),
+            add_dirs: call
+                .add_dirs
+                .or_else(|| agent.and_then(|a| a.add_dirs.clone()))
+                .or_else(|| self.defaults.add_dirs.clone()),
+            max_turns: call
+                .max_turns
+                .or_else(|| agent.and_then(|a| a.max_turns))
+                .or(self.defaults.max_turns),
             cwd: call
                 .cwd
                 .or_else(|| agent.and_then(|a| a.cwd.clone()))
                 .or_else(|| self.defaults.cwd.clone()),
+            timeout: call
+                .timeout
+                .or_else(|| agent.and_then(|a| a.timeout))
+                .or(self.defaults.timeout),
             session: call.session,
             config_dir: agent
                 .and_then(|a| a.config_dir.clone())
@@ -104,63 +134,84 @@ mod tests {
             [defaults]
             model = "sonnet"
             effort = "medium"
+            max_turns = 10
 
             [agents.tester]
             system = "You run the tests."
             model = "haiku"
+            disallowed_tools = ["Bash(rm:*)"]
+            max_turns = 3
             config_dir = ".agent/env/tester"
             "#,
         )
         .unwrap()
     }
 
-    #[test]
-    fn resolve_fills_from_agent_then_defaults() {
-        let params = config().resolve(Call {
+    fn call(agent: Option<&str>) -> Call {
+        Call {
             prompt: "go".into(),
-            agent: Some("tester".into()),
+            agent: agent.map(Into::into),
             system: None,
+            append_system: None,
             model: None,
             effort: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            add_dirs: None,
+            max_turns: None,
             cwd: None,
+            timeout: None,
             session: None,
-        });
-        assert_eq!(params.prompt, "go");
-        assert_eq!(params.system.as_deref(), Some("You run the tests."));
-        assert_eq!(params.model.as_deref(), Some("haiku")); // agent beats default
-        assert_eq!(params.effort.as_deref(), Some("medium")); // falls through to default
-        assert_eq!(params.config_dir.as_deref(), Some(".agent/env/tester"));
+        }
+    }
+
+    #[test]
+    fn resolve_fills_from_agent_then_defaults() {
+        let p = config().resolve(call(Some("tester")));
+        assert_eq!(p.system.as_deref(), Some("You run the tests."));
+        assert_eq!(p.model.as_deref(), Some("haiku")); // agent beats default
+        assert_eq!(p.effort.as_deref(), Some("medium")); // falls through to default
+        assert_eq!(p.max_turns, Some(3)); // agent beats the default of 10
+        assert_eq!(
+            p.disallowed_tools.as_deref(),
+            Some(&["Bash(rm:*)".into()][..])
+        );
+        assert_eq!(p.config_dir.as_deref(), Some(".agent/env/tester"));
     }
 
     #[test]
     fn call_overrides_agent() {
-        let params = config().resolve(Call {
-            prompt: "go".into(),
-            agent: Some("tester".into()),
-            system: None,
-            model: Some("opus".into()),
-            effort: None,
-            allowed_tools: None,
-            cwd: None,
-            session: None,
-        });
-        assert_eq!(params.model.as_deref(), Some("opus"));
+        let mut c = call(Some("tester"));
+        c.model = Some("opus".into());
+        c.max_turns = Some(1);
+        let p = config().resolve(c);
+        assert_eq!(p.model.as_deref(), Some("opus"));
+        assert_eq!(p.max_turns, Some(1));
     }
 
     #[test]
-    fn unknown_agent_falls_back_to_defaults() {
-        let params = config().resolve(Call {
-            prompt: "go".into(),
-            agent: Some("nope".into()),
-            system: None,
-            model: None,
-            effort: None,
-            allowed_tools: None,
-            cwd: None,
-            session: None,
-        });
-        assert_eq!(params.model.as_deref(), Some("sonnet"));
-        assert_eq!(params.system, None);
+    fn unknown_agent_contributes_no_defaults() {
+        let p = config().resolve(call(Some("nope")));
+        assert_eq!(p.model.as_deref(), Some("sonnet")); // server default only
+        assert_eq!(p.system, None);
+        assert_eq!(p.max_turns, Some(10)); // server default
+    }
+
+    #[test]
+    fn unknown_config_key_is_rejected() {
+        let err = Config::parse(
+            r#"
+            [defaults]
+            modle = "sonnet"
+            "#,
+        );
+        assert!(err.is_err(), "a typo in a config key must be rejected");
+    }
+
+    #[test]
+    fn has_agent() {
+        let c = config();
+        assert!(c.has_agent("tester"));
+        assert!(!c.has_agent("nope"));
     }
 }

@@ -25,16 +25,22 @@ prompt(
   prompt: string,          // required: the task/message
   agent: string?,          // select a configured agent's defaults (see Config)
   system: string?,         // system prompt
+  append_system: string?,  // appended to the system prompt
   model: string?,
   effort: string?,         // low | medium | high
   allowed_tools: [string]?,
+  disallowed_tools: [string]?,
+  add_dirs: [string]?,     // extra directories the agent may access
+  max_turns: int?,         // bound the agentic turns
   cwd: string?,
+  timeout: int?,           // per-run seconds, overriding the backend default
   session: string?,        // continue/resume a thread
-  max_turns: int?,
-  max_budget_usd: number?,
   ...                      // any other wrapper parameter, all optional
 )
 ```
+
+A named `agent` that does not exist is an error, and an empty prompt is
+rejected, so a typo fails loudly rather than running with the wrong config.
 
 That is the whole MVP: an MCP server (or one-shot CLI) that runs a prompt through
 a backend, with defaults from config. The result is the backend's output.

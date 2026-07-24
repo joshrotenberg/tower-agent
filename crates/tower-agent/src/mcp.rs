@@ -13,6 +13,7 @@ use tower_mcp::{CallToolResult, Error, McpRouter, NoParams, Tool, ToolBuilder};
 
 use crate::backend::{Backend, Outcome};
 use crate::config::Config;
+use crate::error::RunError;
 use crate::params::Call;
 
 /// The server: a config and a backend. Cheap to clone (both are shared).
@@ -36,10 +37,20 @@ impl Server {
     }
 
     /// Resolve a call against config and run it through the backend. This is the
-    /// atom; the MCP `prompt` tool is a thin wrapper over it.
-    pub async fn run(&self, call: Call) -> Result<Outcome, crate::backend::BackendError> {
+    /// atom; the MCP `prompt` tool is a thin wrapper over it. The call is
+    /// validated first: a named agent must exist, and the prompt must not be
+    /// empty.
+    pub async fn run(&self, call: Call) -> Result<Outcome, RunError> {
+        if call.prompt.trim().is_empty() {
+            return Err(RunError::EmptyPrompt);
+        }
+        if let Some(agent) = &call.agent
+            && !self.config.has_agent(agent)
+        {
+            return Err(RunError::UnknownAgent(agent.clone()));
+        }
         let params = self.config.resolve(call);
-        self.backend.run(&params).await
+        Ok(self.backend.run(&params).await?)
     }
 
     /// Build the MCP router that exposes this server.
@@ -123,11 +134,15 @@ mod tests {
             model = "sonnet"
             effort = "medium"
             cwd = "/repo"
+            max_turns = 10
 
             [agents.tester]
             system = "You run the tests."
             model = "haiku"
             allowed_tools = ["Bash(cargo test:*)"]
+            disallowed_tools = ["Bash(rm:*)"]
+            add_dirs = ["/shared"]
+            max_turns = 3
             "#,
         )
         .unwrap();
@@ -165,6 +180,9 @@ mod tests {
         assert_eq!(p["effort"], "medium"); // falls through to the default
         assert_eq!(p["cwd"], "/repo"); // from the default
         assert_eq!(p["allowed_tools"][0], "Bash(cargo test:*)");
+        assert_eq!(p["disallowed_tools"][0], "Bash(rm:*)");
+        assert_eq!(p["add_dirs"][0], "/shared");
+        assert_eq!(p["max_turns"], 3); // agent beats the default of 10
     }
 
     #[tokio::test]
@@ -176,19 +194,29 @@ mod tests {
                 "agent": "tester",
                 "prompt": "go",
                 "system": "custom",
+                "append_system": "and be brief",
                 "model": "opus",
                 "effort": "high",
                 "cwd": "/elsewhere",
                 "allowed_tools": ["Read"],
+                "disallowed_tools": ["Write"],
+                "add_dirs": ["/tmp"],
+                "max_turns": 1,
+                "timeout": 42,
                 "session": "s-42"
             }),
         )
         .await;
         assert_eq!(p["system"], "custom");
+        assert_eq!(p["append_system"], "and be brief");
         assert_eq!(p["model"], "opus");
         assert_eq!(p["effort"], "high");
         assert_eq!(p["cwd"], "/elsewhere");
         assert_eq!(p["allowed_tools"][0], "Read");
+        assert_eq!(p["disallowed_tools"][0], "Write");
+        assert_eq!(p["add_dirs"][0], "/tmp");
+        assert_eq!(p["max_turns"], 1);
+        assert_eq!(p["timeout"], 42);
         assert_eq!(p["session"], "s-42");
     }
 
@@ -198,16 +226,31 @@ mod tests {
         let p = resolved(&mut c, json!({ "prompt": "go" })).await;
         assert_eq!(p["model"], "sonnet");
         assert_eq!(p["effort"], "medium");
+        assert_eq!(p["max_turns"], 10);
         assert!(p["system"].is_null());
         assert!(p["allowed_tools"].is_null());
     }
 
     #[tokio::test]
-    async fn unknown_agent_falls_back_to_defaults() {
+    async fn unknown_agent_is_an_error() {
         let mut c = client().await;
-        let p = resolved(&mut c, json!({ "agent": "nope", "prompt": "go" })).await;
-        assert_eq!(p["model"], "sonnet");
-        assert!(p["system"].is_null());
+        // A named agent that does not exist is a request error, not a silent run
+        // with server defaults.
+        let err: Value = c
+            .call_tool_expect_error("prompt", json!({ "agent": "nope", "prompt": "go" }))
+            .await;
+        assert!(
+            err.to_string().contains("nope"),
+            "error should name the agent: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_prompt_is_an_error() {
+        let mut c = client().await;
+        let _err: Value = c
+            .call_tool_expect_error("prompt", json!({ "prompt": "   " }))
+            .await;
     }
 
     #[tokio::test]
