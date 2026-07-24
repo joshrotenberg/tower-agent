@@ -38,22 +38,18 @@ pub trait Backend: Send + Sync {
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError>;
 }
 
-/// A backend that runs no model: it echoes the resolved parameters. Useful for a
-/// dry run and for testing the server without a live model.
+/// A backend that runs no model: it echoes the resolved parameters as JSON.
+/// Useful as a dry run (see exactly what a call resolves to) and for testing the
+/// server without a live model.
 pub struct StubBackend;
 
 #[async_trait]
 impl Backend for StubBackend {
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
-        let system = params
-            .system
-            .as_deref()
-            .map(|s| s.chars().take(48).collect::<String>());
+        let text = serde_json::to_string_pretty(params)
+            .map_err(|e| BackendError::new(format!("serialize params: {e}")))?;
         Ok(Outcome {
-            text: format!(
-                "[stub] model={:?} effort={:?} system={:?} session={:?} :: {}",
-                params.model, params.effort, system, params.session, params.prompt
-            ),
+            text,
             session: params.session.clone(),
         })
     }

@@ -1,0 +1,16 @@
+[package]
+name = "tower-agent-claude"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A claude-wrapper backend for tower-agent."
+
+[dependencies]
+tower-agent.workspace = true
+
+async-trait.workspace = true
+claude-wrapper.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

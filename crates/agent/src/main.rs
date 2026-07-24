@@ -7,9 +7,11 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use clap::{Parser, Subcommand};
-use tower_agent::{Call, Config, Server, StubBackend};
+use clap::{Parser, Subcommand, ValueEnum};
+use tower_agent::{Backend, Call, Config, Server, StubBackend};
+use tower_agent_claude::ClaudeBackend;
 
 #[derive(Parser)]
 #[command(name = "agent", about = "an agent server over MCP")]
@@ -17,8 +19,22 @@ struct Cli {
     /// Config file: server defaults and named agents.
     #[arg(long, default_value = ".agent/config.toml")]
     config: PathBuf,
+    /// Which backend runs prompts.
+    #[arg(long, value_enum, default_value_t = BackendKind::Claude)]
+    backend: BackendKind,
+    /// Per-run backend timeout, in seconds.
+    #[arg(long, default_value_t = 600)]
+    timeout: u64,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BackendKind {
+    /// Run prompts through the Claude Code CLI.
+    Claude,
+    /// Run no model; echo the resolved parameters as JSON (a dry run).
+    Stub,
 }
 
 #[derive(Subcommand)]
@@ -60,7 +76,11 @@ async fn main() -> anyhow::Result<()> {
         );
         Config::default()
     };
-    let server = Server::new(config, Arc::new(StubBackend));
+    let backend: Arc<dyn Backend> = match cli.backend {
+        BackendKind::Stub => Arc::new(StubBackend),
+        BackendKind::Claude => Arc::new(ClaudeBackend::new(Duration::from_secs(cli.timeout))),
+    };
+    let server = Server::new(config, backend);
 
     match cli.cmd {
         Cmd::List => {
