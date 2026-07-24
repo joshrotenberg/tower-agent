@@ -5,6 +5,7 @@
 model = "sonnet"
 effort = "medium"
 cwd = "."
+max_turns = 20
 
 [agents.scout]
 system = "You are a scout. Read the repository and report what you find, concisely."
@@ -13,4 +14,7 @@ model = "haiku"
 [agents.tester]
 system = "You run the tests and report failures with the exact output."
 allowed_tools = ["Bash(cargo test:*)"]
+disallowed_tools = ["Bash(rm:*)"]
+max_turns = 8
+# add_dirs = ["../shared"]           # extra directories this agent may access
 # config_dir = ".agent/env/tester"   # this agent's own CLAUDE_CONFIG_DIR

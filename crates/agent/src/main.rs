@@ -48,6 +48,12 @@ enum Cmd {
         /// Select a configured agent, using its defaults.
         #[arg(long)]
         agent: Option<String>,
+        /// Override the model.
+        #[arg(long)]
+        model: Option<String>,
+        /// Bound the number of agentic turns.
+        #[arg(long)]
+        max_turns: Option<u32>,
         /// Continue a session (thread) so the backend resumes.
         #[arg(long)]
         session: Option<String>,
@@ -95,17 +101,17 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Run {
             prompt,
             agent,
+            model,
+            max_turns,
             session,
         } => {
             let call = Call {
                 prompt,
                 agent,
-                system: None,
-                model: None,
-                effort: None,
-                allowed_tools: None,
-                cwd: None,
+                model,
+                max_turns,
                 session,
+                ..Default::default()
             };
             let outcome = server
                 .run(call)
