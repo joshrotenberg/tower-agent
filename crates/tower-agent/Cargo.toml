@@ -1,0 +1,22 @@
+[package]
+name = "tower-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "An agent server exposed as an MCP surface: a prompt tool over a backend, with configurable agents."
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tower-mcp.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower-mcp = { workspace = true, features = ["testing"] }
