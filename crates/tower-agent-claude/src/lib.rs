@@ -17,8 +17,11 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, StreamEvent, stream_query};
+use claude_wrapper::types::{OutputFormat, QueryResult};
 use claude_wrapper::{Claude, Effort, QueryCommand};
-use tower_agent::{Backend, BackendError, Outcome, Params};
+use tokio::sync::mpsc::UnboundedSender;
+use tower_agent::{Backend, BackendError, Event, Outcome, Params};
 
 /// A backend that runs prompts through the Claude Code CLI via `claude-wrapper`.
 pub struct ClaudeBackend {
@@ -29,6 +32,24 @@ impl ClaudeBackend {
     /// A backend with the given per-run timeout.
     pub fn new(timeout: Duration) -> Self {
         ClaudeBackend { timeout }
+    }
+
+    /// Build the `Claude` for these params: working directory, timeout, and the
+    /// per-agent environment (`CLAUDE_CONFIG_DIR`). Auth does not inherit into a
+    /// fresh config dir, so an isolated one must be provisioned a token.
+    fn build_claude(&self, params: &Params) -> Result<Claude, BackendError> {
+        let cwd = params.cwd.clone().unwrap_or_else(|| ".".to_string());
+        let timeout = params
+            .timeout
+            .map(Duration::from_secs)
+            .unwrap_or(self.timeout);
+        let mut builder = Claude::builder().working_dir(cwd).timeout(timeout);
+        if let Some(dir) = &params.config_dir {
+            builder = builder.env("CLAUDE_CONFIG_DIR", dir);
+        }
+        builder
+            .build()
+            .map_err(|e| BackendError::new(format!("claude unavailable: {e}")))
     }
 }
 
@@ -86,21 +107,7 @@ pub fn build_query(params: &Params) -> QueryCommand {
 #[async_trait]
 impl Backend for ClaudeBackend {
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
-        let cwd = params.cwd.clone().unwrap_or_else(|| ".".to_string());
-        let timeout = params
-            .timeout
-            .map(Duration::from_secs)
-            .unwrap_or(self.timeout);
-        let mut builder = Claude::builder().working_dir(cwd).timeout(timeout);
-        // Each agent may run in its own environment. Auth does not inherit into a
-        // fresh CLAUDE_CONFIG_DIR, so an isolated one must be provisioned a token.
-        if let Some(dir) = &params.config_dir {
-            builder = builder.env("CLAUDE_CONFIG_DIR", dir);
-        }
-        let claude = builder
-            .build()
-            .map_err(|e| BackendError::new(format!("claude unavailable: {e}")))?;
-
+        let claude = self.build_claude(params)?;
         match build_query(params).execute_json(&claude).await {
             Ok(qr) if qr.is_error => Err(BackendError::new(qr.result)),
             Ok(qr) => Ok(Outcome {
@@ -109,6 +116,57 @@ impl Backend for ClaudeBackend {
             }),
             Err(e) => Err(BackendError::new(format!("run failed: {e}"))),
         }
+    }
+
+    async fn run_streaming(
+        &self,
+        params: &Params,
+        events: UnboundedSender<Event>,
+    ) -> Result<Outcome, BackendError> {
+        let claude = self.build_claude(params)?;
+        // Stream JSON with partial messages so assistant text arrives as deltas.
+        let cmd = build_query(params)
+            .output_format(OutputFormat::StreamJson)
+            .include_partial_messages();
+
+        let mut final_result: Option<QueryResult> = None;
+        let mut session_seen: Option<String> = None;
+        let mut accumulated = String::new();
+
+        let outcome = stream_query(&claude, &cmd, |event: StreamEvent| {
+            if session_seen.is_none()
+                && let Some(id) = event.session_id()
+            {
+                session_seen = Some(id.to_string());
+            }
+            if event.is_result() {
+                if let Ok(qr) = serde_json::from_value::<QueryResult>(event.data.clone()) {
+                    final_result = Some(qr);
+                }
+                return;
+            }
+            if let Some(PartialMessageEvent::BlockDelta {
+                delta: BlockDelta::Text(text),
+                ..
+            }) = event.partial_message()
+            {
+                accumulated.push_str(&text);
+                // The receiver may be gone (caller stopped listening); ignore.
+                let _ = events.send(Event::TextDelta(text));
+            }
+        })
+        .await;
+        outcome.map_err(|e| BackendError::new(format!("stream failed: {e}")))?;
+
+        let (text, session_id) = match final_result {
+            Some(qr) if qr.is_error => return Err(BackendError::new(qr.result)),
+            Some(qr) => (qr.result, qr.session_id),
+            None => (accumulated, session_seen.unwrap_or_default()),
+        };
+        Ok(Outcome {
+            text,
+            session: (!session_id.is_empty()).then_some(session_id),
+        })
     }
 }
 
@@ -209,6 +267,28 @@ mod tests {
             "got: {}",
             outcome.text
         );
+        assert!(outcome.session.is_some());
+    }
+
+    // Live streaming smoke test: needs the claude CLI and auth.
+    //   cargo test -p tower-agent-claude -- --ignored
+    #[tokio::test]
+    #[ignore = "needs the claude CLI and auth"]
+    async fn live_streaming_emits_deltas() {
+        let backend = ClaudeBackend::new(Duration::from_secs(120));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = Params {
+            prompt: "Count from 1 to 5, one number per line.".into(),
+            model: Some("haiku".into()),
+            ..Default::default()
+        };
+        let outcome = backend.run_streaming(&params, tx).await.expect("run");
+        let mut deltas = 0;
+        while rx.try_recv().is_ok() {
+            deltas += 1;
+        }
+        assert!(deltas > 0, "expected streamed text deltas, got none");
+        assert!(outcome.text.contains('5'), "final text: {}", outcome.text);
         assert!(outcome.session.is_some());
     }
 }

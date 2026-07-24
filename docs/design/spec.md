@@ -42,6 +42,25 @@ prompt(
 A named `agent` that does not exist is an error, and an empty prompt is
 rejected, so a typo fails loudly rather than running with the wrong config.
 
+### Execution: sync, async, streaming
+
+A prompt can run for minutes, so the caller chooses how to wait, and blocking is
+never forced. Both use native MCP mechanisms, not a bespoke run registry.
+
+- **Sync**: call `prompt` normally; it blocks and returns the outcome. Fine for
+  short prompts and simple clients.
+- **Async**: the tool declares `taskSupport = optional`, so a client MAY call it
+  as a task. It returns a task handle immediately; the client polls, waits, or
+  cancels through the standard MCP task methods. The runtime spawns and stores
+  the run; no run registry of our own yet (that arrives with sessions and
+  observability, with the run id as the spine).
+- **Streaming**: opt-in via the request's progress token. When present, assistant
+  text is forwarded as progress notifications as it is produced; when absent,
+  nothing streams and only the final outcome returns. The backend seam has a
+  streaming path (emit events, return the final outcome) with a non-streaming
+  default, so a backend that cannot stream still conforms. The event set starts
+  at text deltas and status, and will grow to tool-use and turn boundaries.
+
 That is the whole MVP: an MCP server (or one-shot CLI) that runs a prompt through
 a backend, with defaults from config. The result is the backend's output.
 Structure on the result (`reply`/`posts`) arrives with inter-agent communication,

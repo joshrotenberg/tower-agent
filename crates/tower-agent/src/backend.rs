@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use serde::Serialize;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::params::Params;
 
@@ -32,10 +33,36 @@ pub struct Outcome {
     pub session: Option<String>,
 }
 
+/// An incremental event emitted while a prompt runs, for callers that opt into
+/// streaming. Non-exhaustive: richer events (tool use, turn boundaries) are
+/// planned.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum Event {
+    /// A chunk of assistant text as it is produced.
+    TextDelta(String),
+    /// A human-readable status line.
+    Status(String),
+}
+
 /// The one seam where a model backend lives.
 #[async_trait]
 pub trait Backend: Send + Sync {
+    /// Run a prompt to completion and return the outcome.
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError>;
+
+    /// Run a prompt, emitting incremental [`Event`]s to `events` as they occur,
+    /// then return the final outcome. The default does not stream: it runs and
+    /// returns the outcome, sending no events. Backends that can stream override
+    /// this.
+    async fn run_streaming(
+        &self,
+        params: &Params,
+        events: UnboundedSender<Event>,
+    ) -> Result<Outcome, BackendError> {
+        let _ = events;
+        self.run(params).await
+    }
 }
 
 /// A backend that runs no model: it echoes the resolved parameters as JSON.
