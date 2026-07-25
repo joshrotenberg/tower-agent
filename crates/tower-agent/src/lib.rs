@@ -28,7 +28,7 @@ pub mod session;
 pub use backend::{Backend, BackendError, Event, Outcome, Post, StubBackend};
 pub use budget::Budget;
 pub use bus::{Bus, BusHandle, Message};
-pub use config::{AgentDef, BudgetConfig, Config, Defaults, ScheduledAgent};
+pub use config::{AgentDef, BudgetConfig, Config, Defaults, ScheduledAgent, SecurityConfig};
 pub use error::RunError;
 pub use mcp::{Server, router};
 pub use params::{Call, Params};
