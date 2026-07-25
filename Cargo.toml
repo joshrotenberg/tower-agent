@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/tower-agent", "crates/tower-agent-claude", "crates/agent"]
+members = [
+    "crates/tower-agent",
+    "crates/tower-agent-claude",
+    "crates/tower-agent-codex",
+    "crates/agent",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,11 +16,13 @@ repository = "https://github.com/joshrotenberg/tower-agent"
 [workspace.dependencies]
 tower-agent = { path = "crates/tower-agent", version = "0.1.0" }
 tower-agent-claude = { path = "crates/tower-agent-claude", version = "0.1.0" }
+tower-agent-codex = { path = "crates/tower-agent-codex", version = "0.1.0" }
 
 anyhow = "1"
 async-trait = "0.1"
 chrono = "0.4"
 claude-wrapper = "0.13"
+codex-wrapper = "0.2"
 clap = { version = "4", features = ["derive"] }
 croner = "3"
 schemars = "1.2"

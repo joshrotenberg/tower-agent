@@ -12,6 +12,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use tower_agent::{Backend, Call, Config, FileSessionStore, Server, StubBackend};
 use tower_agent_claude::ClaudeBackend;
+use tower_agent_codex::CodexBackend;
 
 #[derive(Parser)]
 #[command(name = "agent", about = "an agent server over MCP")]
@@ -36,6 +37,8 @@ struct Cli {
 enum BackendKind {
     /// Run prompts through the Claude Code CLI.
     Claude,
+    /// Run prompts through the Codex CLI.
+    Codex,
     /// Run no model; echo the resolved parameters as JSON (a dry run).
     Stub,
 }
@@ -109,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let backend: Arc<dyn Backend> = match cli.backend {
         BackendKind::Stub => Arc::new(StubBackend),
         BackendKind::Claude => Arc::new(ClaudeBackend::new(Duration::from_secs(cli.timeout))),
+        BackendKind::Codex => Arc::new(CodexBackend::new(Duration::from_secs(cli.timeout))),
     };
     let sessions = Arc::new(FileSessionStore::open(&cli.sessions));
     let server = Server::with_sessions(config, backend, sessions);
