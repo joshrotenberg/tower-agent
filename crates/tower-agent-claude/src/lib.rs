@@ -110,10 +110,10 @@ impl Backend for ClaudeBackend {
         let claude = self.build_claude(params)?;
         match build_query(params).execute_json(&claude).await {
             Ok(qr) if qr.is_error => Err(BackendError::new(qr.result)),
-            Ok(qr) => Ok(Outcome {
-                text: qr.result,
-                session: (!qr.session_id.is_empty()).then_some(qr.session_id),
-            }),
+            Ok(qr) => Ok(Outcome::from_reply(
+                qr.result,
+                (!qr.session_id.is_empty()).then_some(qr.session_id),
+            )),
             Err(e) => Err(BackendError::new(format!("run failed: {e}"))),
         }
     }
@@ -158,15 +158,15 @@ impl Backend for ClaudeBackend {
         .await;
         outcome.map_err(|e| BackendError::new(format!("stream failed: {e}")))?;
 
-        let (text, session_id) = match final_result {
+        let (reply, session_id) = match final_result {
             Some(qr) if qr.is_error => return Err(BackendError::new(qr.result)),
             Some(qr) => (qr.result, qr.session_id),
             None => (accumulated, session_seen.unwrap_or_default()),
         };
-        Ok(Outcome {
-            text,
-            session: (!session_id.is_empty()).then_some(session_id),
-        })
+        Ok(Outcome::from_reply(
+            reply,
+            (!session_id.is_empty()).then_some(session_id),
+        ))
     }
 }
 
@@ -263,9 +263,9 @@ mod tests {
         };
         let outcome = backend.run(&params).await.expect("run");
         assert!(
-            outcome.text.to_lowercase().contains("pong"),
+            outcome.reply.to_lowercase().contains("pong"),
             "got: {}",
-            outcome.text
+            outcome.reply
         );
         assert!(outcome.session.is_some());
     }
@@ -288,7 +288,7 @@ mod tests {
             deltas += 1;
         }
         assert!(deltas > 0, "expected streamed text deltas, got none");
-        assert!(outcome.text.contains('5'), "final text: {}", outcome.text);
+        assert!(outcome.reply.contains('5'), "final text: {}", outcome.reply);
         assert!(outcome.session.is_some());
     }
 
@@ -325,9 +325,9 @@ mod tests {
             .await
             .expect("turn 2");
         assert!(
-            second.text.to_lowercase().contains("kestrel"),
+            second.reply.to_lowercase().contains("kestrel"),
             "resumed thread should recall the word, got: {}",
-            second.text
+            second.reply
         );
         assert_eq!(second.session.as_deref(), Some(id.as_str()));
 

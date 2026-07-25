@@ -226,8 +226,11 @@ a live model.
 
 ## Open questions
 
-- Result shape at the atom: raw backend output, versus adopting
-  `{summary, reply, posts}` earlier because inter-agent comms will need it.
+- Resolved: the atom's result is `{summary, reply, posts}` plus the session.
+  `reply` is the answer (the model's text for a plain prompt), `summary` a log
+  line, `posts` empty until an agent participates in the bus. Structured
+  production via a JSON schema is deferred to channels, to keep the streaming
+  path clean (a schema would stream JSON, not prose).
 - How much shared scaffolding should dictate versus leave to the agent's prompt
   (the directed-reply instruction once overrode an agent's own prompt).
 - Where the gate re-enters, if it does: an agent (stochastic) or a server

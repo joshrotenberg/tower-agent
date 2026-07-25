@@ -90,7 +90,7 @@ impl Server {
     /// Record the completed turn and return the outcome carrying our session id.
     fn finish(&self, id: String, agent: Option<String>, mut outcome: Outcome) -> Outcome {
         let backend_token = outcome.session.take();
-        let last = preview(&outcome.text);
+        let last = preview(&outcome.reply);
         self.sessions.record_turn(&id, agent, backend_token, last);
         outcome.session = Some(id);
         outcome
@@ -291,10 +291,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Backend for StreamBackend {
         async fn run(&self, _params: &crate::Params) -> Result<Outcome, crate::BackendError> {
-            Ok(Outcome {
-                text: "hello".into(),
-                session: Some("s1".into()),
-            })
+            Ok(Outcome::from_reply("hello", Some("s1".into())))
         }
         async fn run_streaming(
             &self,
@@ -304,10 +301,7 @@ mod tests {
             let _ = events.send(Event::Status("starting".into()));
             let _ = events.send(Event::TextDelta("hel".into()));
             let _ = events.send(Event::TextDelta("lo".into()));
-            Ok(Outcome {
-                text: "hello".into(),
-                session: Some("s1".into()),
-            })
+            Ok(Outcome::from_reply("hello", Some("s1".into())))
         }
     }
 
@@ -342,8 +336,8 @@ mod tests {
     /// Run the `prompt` tool and return the resolved [`Params`] the stub echoed.
     async fn resolved(client: &mut TestClient, args: Value) -> Value {
         let outcome: Value = client.call_tool_typed("prompt", args).await;
-        let text = outcome["text"].as_str().expect("outcome.text");
-        serde_json::from_str(text).expect("stub echoes resolved params as json")
+        let reply = outcome["reply"].as_str().expect("outcome.reply");
+        serde_json::from_str(reply).expect("stub echoes resolved params as json")
     }
 
     #[tokio::test]
@@ -487,10 +481,7 @@ mod tests {
             async fn run(&self, params: &crate::Params) -> Result<Outcome, crate::BackendError> {
                 self.seen.lock().unwrap().push(params.session.clone());
                 let n = self.seen.lock().unwrap().len();
-                Ok(Outcome {
-                    text: "ok".into(),
-                    session: Some(format!("bk-{n}")),
-                })
+                Ok(Outcome::from_reply("ok", Some(format!("bk-{n}"))))
             }
         }
 
@@ -531,6 +522,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plain_prompt_returns_reply_and_summary_without_posts() {
+        let mut c = client().await;
+        let outcome: Value = c.call_tool_typed("prompt", json!({ "prompt": "go" })).await;
+        // The stub's reply is the resolved params JSON; the prompt is in there.
+        assert!(outcome["reply"].as_str().unwrap().contains("go"));
+        assert!(!outcome["summary"].as_str().unwrap().is_empty());
+        assert!(outcome["posts"].is_null(), "posts omitted when empty");
+    }
+
+    #[tokio::test]
+    async fn posts_pass_through_from_the_backend() {
+        struct Poster;
+        #[async_trait::async_trait]
+        impl Backend for Poster {
+            async fn run(&self, _p: &crate::Params) -> Result<Outcome, crate::BackendError> {
+                Ok(Outcome {
+                    summary: "posted".into(),
+                    reply: "done".into(),
+                    posts: vec![crate::Post {
+                        channel: "board".into(),
+                        body: "hi".into(),
+                        to: Some("scout".into()),
+                        reply_to: Some(3),
+                    }],
+                    session: None,
+                })
+            }
+        }
+
+        let mut client =
+            TestClient::from_router(Server::new(Config::default(), Arc::new(Poster)).router());
+        client.initialize().await;
+        let outcome: Value = client
+            .call_tool_typed("prompt", json!({ "prompt": "go" }))
+            .await;
+        assert_eq!(outcome["reply"], "done");
+        assert_eq!(outcome["summary"], "posted");
+        assert_eq!(outcome["posts"][0]["channel"], "board");
+        assert_eq!(outcome["posts"][0]["to"], "scout");
+        assert_eq!(outcome["posts"][0]["reply_to"], 3);
+    }
+
+    #[tokio::test]
     async fn run_streaming_forwards_events_and_returns_outcome() {
         let server = Server::new(Config::default(), Arc::new(StreamBackend));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -544,7 +578,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(outcome.text, "hello");
+        assert_eq!(outcome.reply, "hello");
         let mut got = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             got.push(ev);
@@ -569,7 +603,7 @@ mod tests {
             .await
             .unwrap();
         assert!(rx.try_recv().is_err(), "stub streams nothing");
-        assert!(outcome.text.contains("go"));
+        assert!(outcome.reply.contains("go"));
     }
 
     #[tokio::test]
