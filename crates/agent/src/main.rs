@@ -71,7 +71,15 @@ enum Cmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Serve the agent server over stdio (MCP); runs the scheduler too.
+    /// Broadcast a message to a channel, wait for subscribers to react, and
+    /// print the feed.
+    Broadcast {
+        /// The channel to post on.
+        channel: String,
+        /// The message body.
+        body: String,
+    },
+    /// Serve the agent server over stdio (MCP); runs the scheduler and bus too.
     Serve,
 }
 
@@ -154,6 +162,19 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("tick: {e}"))?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
         }
+        Cmd::Broadcast { channel, body } => {
+            let bus = server.spawn_bus();
+            server.broadcast(&channel, "operator", &body);
+            server.wait_idle().await;
+            bus.abort();
+            for m in server.feed(None, 50) {
+                let re = m
+                    .reply_to
+                    .map(|r| format!(" (re #{r})"))
+                    .unwrap_or_default();
+                println!("#{} [{}] <{}>{re} {}", m.id, m.channel, m.from, m.body);
+            }
+        }
         Cmd::Serve => {
             let scheduler = server
                 .spawn_scheduler()
@@ -161,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
             if !scheduler.is_empty() {
                 eprintln!("scheduler: {} agent(s) scheduled", scheduler.len());
             }
+            let _bus = server.spawn_bus();
             let router = server.router();
             let mut transport = tower_mcp::StdioTransport::new(router);
             let result = transport.run().await;

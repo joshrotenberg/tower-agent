@@ -219,8 +219,10 @@ a live model.
 - **M3** scheduling: agents with a cron `schedule` + `schedule_prompt`, a
   per-agent scheduler task (croner, optional seconds), ticks that share a session
   for memory, `serve` starting the scheduler, and `agent tick`. (done)
-- **M4** inter-agent communication: structured result, channels, directed
-  threads, the depth bound, turn context.
+- **M4** inter-agent communication: structured result (done, #6), channels +
+  the subscribe trigger (done, #7, one-hop), then directed threads (#8), the
+  cascade + depth bound (#9), turn context (#10), and the feed/broadcast tools
+  (#11, started).
 - **M5** observability rounded out (feed/idle over MCP); the codex backend.
 - **M6** provoke on a real repo; add only the mechanical layers failures name.
 

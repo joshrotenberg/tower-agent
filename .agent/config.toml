@@ -27,3 +27,10 @@ system = "You groom the backlog for this repository."
 # cwd = "../foo"                     # the repo this agent tends
 schedule = "0 */6 * * *"             # every six hours
 schedule_prompt = "Review the open issues and pick the next one to work on."
+
+# A subscribed agent reacts to messages broadcast on its channels. Try:
+#   agent broadcast board "issue 42 looks like a flaky test"
+[agents.triager]
+system = "You triage incoming reports. Reply with a one-line triage verdict."
+model = "haiku"
+subscriptions = ["board"]
