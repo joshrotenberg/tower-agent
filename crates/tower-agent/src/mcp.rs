@@ -13,18 +13,20 @@ use tower_mcp::extract::{Context, Json, State};
 use tower_mcp::{CallToolResult, Error, McpRouter, NoParams, TaskSupportMode, Tool, ToolBuilder};
 
 use crate::backend::{Backend, Event, Outcome};
+use crate::bus::Bus;
 use crate::config::Config;
 use crate::error::RunError;
 use crate::params::{Call, Params};
 use crate::session::{MemorySessionStore, SessionStore};
 
-/// The server: a config, a backend, and a session store. Cheap to clone (all are
-/// shared).
+/// The server: a config, a backend, a session store, and a bus. Cheap to clone
+/// (all are shared).
 #[derive(Clone)]
 pub struct Server {
-    config: Arc<Config>,
-    backend: Arc<dyn Backend>,
-    sessions: Arc<dyn SessionStore>,
+    pub(crate) config: Arc<Config>,
+    pub(crate) backend: Arc<dyn Backend>,
+    pub(crate) sessions: Arc<dyn SessionStore>,
+    pub(crate) bus: Bus,
 }
 
 impl Server {
@@ -43,6 +45,7 @@ impl Server {
             config: Arc::new(config),
             backend,
             sessions,
+            bus: Bus::new(),
         }
     }
 
@@ -166,7 +169,51 @@ pub fn router(server: Server) -> McpRouter {
         )
         .tool(prompt_tool(server.clone()))
         .tool(agents_tool(server.clone()))
-        .tool(sessions_tool(server))
+        .tool(sessions_tool(server.clone()))
+        .tool(broadcast_tool(server.clone()))
+        .tool(feed_tool(server))
+}
+
+#[derive(serde::Deserialize, JsonSchema)]
+struct BroadcastInput {
+    channel: String,
+    body: String,
+}
+
+fn broadcast_tool(server: Server) -> Tool {
+    ToolBuilder::new("broadcast")
+        .description("Post a message to a channel; subscribed agents react")
+        .extractor_handler(
+            server,
+            |State(server): State<Server>, Json(input): Json<BroadcastInput>| async move {
+                let msg = server.broadcast(&input.channel, "operator", &input.body);
+                CallToolResult::from_serialize(&msg)
+            },
+        )
+        .build()
+}
+
+#[derive(serde::Deserialize, JsonSchema)]
+struct FeedInput {
+    /// Only this channel, if given.
+    #[serde(default)]
+    channel: Option<String>,
+    /// How many recent messages (default 50).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn feed_tool(server: Server) -> Tool {
+    ToolBuilder::new("feed")
+        .description("Recent messages on the bus (agent-to-agent traffic), newest last")
+        .extractor_handler(
+            server,
+            |State(server): State<Server>, Json(input): Json<FeedInput>| async move {
+                let messages = server.feed(input.channel.as_deref(), input.limit.unwrap_or(50));
+                CallToolResult::from_serialize(&messages)
+            },
+        )
+        .build()
 }
 
 /// A one-line, length-capped preview of an outcome, for the session registry.

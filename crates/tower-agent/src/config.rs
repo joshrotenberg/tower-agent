@@ -58,6 +58,8 @@ pub struct AgentDef {
     /// The prompt fired on each scheduled tick. A generic default is used when a
     /// scheduled agent omits it.
     pub schedule_prompt: Option<String>,
+    /// The channels this agent reacts to: a message on one fires the agent.
+    pub subscriptions: Option<Vec<String>>,
 }
 
 /// A scheduled agent: its name, cron expression, and the prompt fired each tick.
@@ -109,6 +111,19 @@ impl Config {
                         .unwrap_or_else(default_tick_prompt),
                 })
             })
+            .collect()
+    }
+
+    /// The agents subscribed to a channel.
+    pub fn subscribers(&self, channel: &str) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter(|(_, a)| {
+                a.subscriptions
+                    .as_ref()
+                    .is_some_and(|subs| subs.iter().any(|c| c == channel))
+            })
+            .map(|(name, _)| name.clone())
             .collect()
     }
 
