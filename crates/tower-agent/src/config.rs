@@ -81,6 +81,13 @@ pub struct AgentDef {
     /// The prompt fired on each scheduled tick. A generic default is used when a
     /// scheduled agent omits it.
     pub schedule_prompt: Option<String>,
+    /// The timezone the schedule runs in (an IANA name like `America/New_York`).
+    /// Defaults to UTC.
+    pub timezone: Option<String>,
+    /// Fire the schedule once immediately when the server starts, in addition to
+    /// the cron cadence (a simple catch-up).
+    #[serde(default)]
+    pub run_at_start: bool,
     /// The channels this agent reacts to: a message on one fires the agent.
     pub subscriptions: Option<Vec<String>>,
 }
@@ -91,6 +98,10 @@ pub struct ScheduledAgent {
     pub name: String,
     pub schedule: String,
     pub prompt: String,
+    /// The timezone the cron runs in; `None` means UTC.
+    pub timezone: Option<String>,
+    /// Fire once immediately on start, in addition to the cadence.
+    pub run_at_start: bool,
 }
 
 /// The default prompt for a scheduled tick when the agent does not set one.
@@ -132,6 +143,8 @@ impl Config {
                         .schedule_prompt
                         .clone()
                         .unwrap_or_else(default_tick_prompt),
+                    timezone: a.timezone.clone(),
+                    run_at_start: a.run_at_start,
                 })
             })
             .collect()

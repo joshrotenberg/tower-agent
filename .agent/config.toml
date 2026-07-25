@@ -36,6 +36,8 @@ system = "You groom the backlog for this repository."
 # cwd = "../foo"                     # the repo this agent tends
 schedule = "0 */6 * * *"             # every six hours
 schedule_prompt = "Review the open issues and pick the next one to work on."
+# timezone = "America/New_York"      # the schedule runs in this tz (default UTC)
+# run_at_start = true                # also fire once when the server starts
 
 # A subscribed agent reacts to messages broadcast on its channels. Try:
 #   agent broadcast board "issue 42 looks like a flaky test"

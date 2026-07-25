@@ -3,7 +3,8 @@
 //! An agent with a `schedule` gets one background task that computes the next
 //! occurrence, sleeps, then runs the agent's `schedule_prompt`. A scheduled tick
 //! is just another way to call the atom. Scheduled runs reuse a session, so an
-//! agent accumulates memory across ticks. Times are UTC.
+//! agent accumulates memory across ticks. A schedule runs in the agent's
+//! timezone (UTC by default) and can fire once on start (`run_at_start`).
 
 use std::time::Duration;
 
@@ -44,14 +45,18 @@ impl Drop for SchedulerHandle {
     }
 }
 
-/// A bad cron expression on a scheduled agent.
+/// A bad schedule on an agent (a cron expression or a timezone).
 #[derive(Debug, thiserror::Error)]
-#[error("agent {agent}: invalid cron {expr:?}: {source}")]
-pub struct ScheduleError {
-    pub agent: String,
-    pub expr: String,
-    #[source]
-    pub source: croner::errors::CronError,
+pub enum ScheduleError {
+    #[error("agent {agent}: invalid cron {expr:?}: {source}")]
+    Cron {
+        agent: String,
+        expr: String,
+        #[source]
+        source: croner::errors::CronError,
+    },
+    #[error("agent {agent}: unknown timezone {tz:?}")]
+    Timezone { agent: String, tz: String },
 }
 
 /// Parse a cron expression, allowing an optional leading seconds field.
@@ -68,48 +73,83 @@ impl Server {
     pub fn spawn_scheduler(&self) -> Result<SchedulerHandle, ScheduleError> {
         let mut tasks = Vec::new();
         for spec in self.scheduled_agents() {
-            let cron = parse_cron(&spec.schedule).map_err(|source| ScheduleError {
+            let cron = parse_cron(&spec.schedule).map_err(|source| ScheduleError::Cron {
                 agent: spec.name.clone(),
                 expr: spec.schedule.clone(),
                 source,
             })?;
+            let tz = match &spec.timezone {
+                Some(tz) => tz
+                    .parse::<chrono_tz::Tz>()
+                    .map_err(|_| ScheduleError::Timezone {
+                        agent: spec.name.clone(),
+                        tz: tz.clone(),
+                    })?,
+                None => chrono_tz::UTC,
+            };
             let server = self.clone();
             tasks.push(tokio::spawn(run_schedule(
                 server,
                 spec.name,
                 cron,
                 spec.prompt,
+                tz,
+                spec.run_at_start,
             )));
         }
         Ok(SchedulerHandle { tasks })
     }
 }
 
-/// The per-agent loop: wait for the next occurrence, fire, repeat, keeping the
-/// session so ticks share memory.
-async fn run_schedule(server: Server, agent: String, cron: Cron, prompt: String) {
+/// The per-agent loop: optionally fire once on start, then wait for each next
+/// occurrence (in the agent's timezone) and fire, keeping the session so ticks
+/// share memory.
+async fn run_schedule(
+    server: Server,
+    agent: String,
+    cron: Cron,
+    prompt: String,
+    tz: chrono_tz::Tz,
+    run_at_start: bool,
+) {
     let mut session: Option<String> = None;
+    if run_at_start {
+        session = fire(&server, &agent, &prompt, session).await;
+    }
     loop {
-        let now = chrono::Utc::now();
+        let now = chrono::Utc::now().with_timezone(&tz);
         let Ok(next) = cron.find_next_occurrence(&now, false) else {
             tracing::warn!(agent = %agent, "no next occurrence; stopping schedule");
             break;
         };
         let wait = (next - now).to_std().unwrap_or(Duration::ZERO);
         tokio::time::sleep(wait).await;
+        session = fire(&server, &agent, &prompt, session).await;
+    }
+}
 
-        let call = Call {
-            prompt: prompt.clone(),
-            agent: Some(agent.clone()),
-            session: session.clone(),
-            ..Default::default()
-        };
-        match server.run(call).await {
-            Ok(outcome) => {
-                session = outcome.session;
-                tracing::info!(agent = %agent, "scheduled run");
-            }
-            Err(e) => tracing::warn!(agent = %agent, error = %e, "scheduled run failed"),
+/// Fire one scheduled run; return the session to carry to the next tick (the new
+/// one on success, the same one on failure).
+async fn fire(
+    server: &Server,
+    agent: &str,
+    prompt: &str,
+    session: Option<String>,
+) -> Option<String> {
+    let call = Call {
+        prompt: prompt.to_string(),
+        agent: Some(agent.to_string()),
+        session: session.clone(),
+        ..Default::default()
+    };
+    match server.run(call).await {
+        Ok(outcome) => {
+            tracing::info!(agent = %agent, "scheduled run");
+            outcome.session
+        }
+        Err(e) => {
+            tracing::warn!(agent = %agent, error = %e, "scheduled run failed");
+            session
         }
     }
 }
@@ -132,6 +172,48 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
         let next = cron.find_next_occurrence(&now, false).unwrap();
         assert_eq!(next, Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn next_occurrence_respects_timezone() {
+        use chrono::TimeZone;
+        let cron = parse_cron("0 9 * * *").unwrap(); // 9am daily
+        let tz: chrono_tz::Tz = "America/New_York".parse().unwrap();
+        let now = tz.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap(); // 10am ET, past 9am
+        let next = cron.find_next_occurrence(&now, false).unwrap();
+        assert_eq!(next, tz.with_ymd_and_hms(2026, 1, 2, 9, 0, 0).unwrap());
+    }
+
+    #[tokio::test]
+    async fn spawn_scheduler_rejects_a_bad_timezone() {
+        use std::sync::Arc;
+        let config = crate::Config::parse(
+            "[agents.t]\nsystem = \"x\"\nschedule = \"0 0 * * *\"\ntimezone = \"Nowhere/Nope\"\n",
+        )
+        .unwrap();
+        let server = Server::new(config, Arc::new(crate::StubBackend));
+        assert!(matches!(
+            server.spawn_scheduler(),
+            Err(ScheduleError::Timezone { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_at_start_fires_immediately() {
+        use std::sync::Arc;
+        // A far-future cron; run_at_start fires once now anyway.
+        let config = crate::Config::parse(
+            "[agents.t]\nsystem = \"x\"\nschedule = \"0 0 1 1 *\"\nschedule_prompt = \"go\"\nrun_at_start = true\n",
+        )
+        .unwrap();
+        let server = Server::new(config, Arc::new(crate::StubBackend));
+        let handle = server.spawn_scheduler().unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.abort();
+        assert!(
+            !server.sessions().list().is_empty(),
+            "run_at_start should fire once"
+        );
     }
 
     fn server_with_ticker(schedule: &str) -> Server {
