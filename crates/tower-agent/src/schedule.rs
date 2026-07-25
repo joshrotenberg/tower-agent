@@ -148,7 +148,7 @@ mod tests {
         let server = server_with_ticker("0 0 * * *");
         let out = server.tick("ticker", None).await.unwrap();
         // The stub echoes the resolved params as JSON, so the prompt is visible.
-        assert!(out.text.contains("do the thing"), "{}", out.text);
+        assert!(out.reply.contains("do the thing"), "{}", out.reply);
         assert_eq!(out.session.as_deref(), Some("s1"));
     }
 

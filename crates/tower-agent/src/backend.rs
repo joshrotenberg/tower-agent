@@ -7,7 +7,7 @@
 //! live model.
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::params::Params;
@@ -23,14 +23,60 @@ impl BackendError {
     }
 }
 
-/// What a backend returns from a run.
+/// A message from an agent to a channel. Directed (`to`) and threaded
+/// (`reply_to`) fields support agent-to-agent conversation; the routing that
+/// consumes them arrives with channels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Post {
+    /// The channel to post on.
+    pub channel: String,
+    /// The message body.
+    pub body: String,
+    /// Address one agent directly, so it is reached regardless of subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// The id of the message this one answers, so a thread forms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
+}
+
+/// What a backend returns from a run: a structured result plus the session.
+///
+/// - `reply` is the answer to whoever called (the work product). For a plain
+///   prompt it is the model's text.
+/// - `summary` is one line for the operator's log.
+/// - `posts` are messages to other agents; empty until an agent participates in
+///   the bus.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Outcome {
-    /// The model's output.
-    pub text: String,
+    pub summary: String,
+    pub reply: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posts: Vec<Post>,
     /// The backend's session id for this run, if it keeps one (for resume).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+}
+
+impl Outcome {
+    /// A plain outcome: the reply is the answer, the summary a preview of it, no
+    /// posts. Backends use this for a normal, non-structured run.
+    pub fn from_reply(reply: impl Into<String>, session: Option<String>) -> Self {
+        let reply = reply.into();
+        let summary = summarize(&reply);
+        Outcome {
+            summary,
+            reply,
+            posts: Vec::new(),
+            session,
+        }
+    }
+}
+
+/// A one-line, length-capped summary of a reply.
+fn summarize(reply: &str) -> String {
+    let line = reply.trim().lines().next().unwrap_or("").trim();
+    line.chars().take(120).collect()
 }
 
 /// An incremental event emitted while a prompt runs, for callers that opt into
@@ -73,11 +119,8 @@ pub struct StubBackend;
 #[async_trait]
 impl Backend for StubBackend {
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
-        let text = serde_json::to_string_pretty(params)
+        let reply = serde_json::to_string_pretty(params)
             .map_err(|e| BackendError::new(format!("serialize params: {e}")))?;
-        Ok(Outcome {
-            text,
-            session: params.session.clone(),
-        })
+        Ok(Outcome::from_reply(reply, params.session.clone()))
     }
 }

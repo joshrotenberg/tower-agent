@@ -22,7 +22,7 @@ pub mod params;
 pub mod schedule;
 pub mod session;
 
-pub use backend::{Backend, BackendError, Event, Outcome, StubBackend};
+pub use backend::{Backend, BackendError, Event, Outcome, Post, StubBackend};
 pub use config::{AgentDef, Config, Defaults, ScheduledAgent};
 pub use error::RunError;
 pub use mcp::{Server, router};
