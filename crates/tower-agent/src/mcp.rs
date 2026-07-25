@@ -351,6 +351,9 @@ async fn run_streamed(server: Server, ctx: Context, call: Call) -> Result<CallTo
         n += 1.0;
         let message = match event {
             Event::TextDelta(t) => t,
+            Event::Thinking(t) => format!("[thinking] {t}"),
+            Event::ToolUse { name } => format!("[tool] {name}"),
+            Event::Turn { n } => format!("[turn {n}]"),
             Event::Status(s) => s,
         };
         ctx.report_progress(n, None, Some(&message)).await;
@@ -761,6 +764,56 @@ mod tests {
         assert!(
             created["task"]["taskId"].as_str().is_some(),
             "task-augmented call should return a task handle: {created}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_forwards_rich_events_as_progress() {
+        struct Rich;
+        #[async_trait::async_trait]
+        impl Backend for Rich {
+            async fn run(&self, _p: &crate::Params) -> Result<Outcome, crate::BackendError> {
+                Ok(Outcome::from_reply("done", None))
+            }
+            async fn run_streaming(
+                &self,
+                _p: &crate::Params,
+                events: tokio::sync::mpsc::UnboundedSender<Event>,
+            ) -> Result<Outcome, crate::BackendError> {
+                let _ = events.send(Event::Turn { n: 1 });
+                let _ = events.send(Event::ToolUse {
+                    name: "Bash".into(),
+                });
+                let _ = events.send(Event::Thinking("hmm".into()));
+                let _ = events.send(Event::TextDelta("hi".into()));
+                Ok(Outcome::from_reply("done", None))
+            }
+        }
+
+        let mut client =
+            TestClient::from_router(Server::new(Config::default(), Arc::new(Rich)).router());
+        client.initialize().await;
+        let _ = client
+            .send_request(
+                "tools/call",
+                Some(json!({
+                    "name": "prompt",
+                    "arguments": { "prompt": "go" },
+                    "_meta": { "progressToken": "p" }
+                })),
+            )
+            .await;
+        let messages: Vec<String> = client
+            .drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                ServerNotification::Progress(p) => p.message,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            vec!["[turn 1]", "[tool] Bash", "[thinking] hmm", "hi"]
         );
     }
 
