@@ -138,6 +138,7 @@ fn parse_report(json: &str, session: Option<String>) -> Outcome {
             reply: raw.reply,
             posts: raw.posts,
             session,
+            cost_usd: None,
         },
         Err(_) => Outcome::from_reply(json, session),
     }
@@ -181,12 +182,15 @@ impl Backend for ClaudeBackend {
         match cmd.execute_json(&claude).await {
             Ok(qr) if qr.is_error => Err(BackendError::new(qr.result)),
             Ok(qr) => {
+                let cost = qr.cost_usd;
                 let session = (!qr.session_id.is_empty()).then_some(qr.session_id);
-                Ok(if params.structured {
+                let mut outcome = if params.structured {
                     parse_report(&qr.result, session)
                 } else {
                     Outcome::from_reply(qr.result, session)
-                })
+                };
+                outcome.cost_usd = cost;
+                Ok(outcome)
             }
             Err(e) => Err(BackendError::new(format!("run failed: {e}"))),
         }
@@ -231,15 +235,15 @@ impl Backend for ClaudeBackend {
         .await;
         outcome.map_err(|e| BackendError::new(format!("stream failed: {e}")))?;
 
-        let (reply, session_id) = match final_result {
+        let (reply, session_id, cost) = match final_result {
             Some(qr) if qr.is_error => return Err(BackendError::new(qr.result)),
-            Some(qr) => (qr.result, qr.session_id),
-            None => (accumulated, session_seen.unwrap_or_default()),
+            Some(qr) => (qr.result, qr.session_id, qr.cost_usd),
+            None => (accumulated, session_seen.unwrap_or_default(), None),
         };
-        Ok(Outcome::from_reply(
-            reply,
-            (!session_id.is_empty()).then_some(session_id),
-        ))
+        let mut outcome =
+            Outcome::from_reply(reply, (!session_id.is_empty()).then_some(session_id));
+        outcome.cost_usd = cost;
+        Ok(outcome)
     }
 }
 

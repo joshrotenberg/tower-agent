@@ -56,6 +56,9 @@ pub struct Outcome {
     /// The backend's session id for this run, if it keeps one (for resume).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// The run's cost in USD, if the backend reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 impl Outcome {
@@ -69,6 +72,7 @@ impl Outcome {
             reply,
             posts: Vec::new(),
             session,
+            cost_usd: None,
         }
     }
 }

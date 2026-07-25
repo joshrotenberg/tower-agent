@@ -19,7 +19,18 @@ pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
     #[serde(default)]
+    pub budget: BudgetConfig,
+    #[serde(default)]
     pub agents: BTreeMap<String, AgentDef>,
+}
+
+/// The server-wide spend cap.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetConfig {
+    /// Refuse further runs once cumulative spend reaches this many USD. Omit for
+    /// no limit.
+    pub max_usd: Option<f64>,
 }
 
 /// Server-wide defaults, the least specific layer.

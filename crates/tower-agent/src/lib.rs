@@ -15,6 +15,7 @@
 //! `docs/design/tower-mcp-agent-spec.md`.
 
 pub mod backend;
+pub mod budget;
 pub mod bus;
 pub mod config;
 pub mod error;
@@ -25,8 +26,9 @@ pub mod schedule;
 pub mod session;
 
 pub use backend::{Backend, BackendError, Event, Outcome, Post, StubBackend};
+pub use budget::Budget;
 pub use bus::{Bus, BusHandle, Message};
-pub use config::{AgentDef, Config, Defaults, ScheduledAgent};
+pub use config::{AgentDef, BudgetConfig, Config, Defaults, ScheduledAgent};
 pub use error::RunError;
 pub use mcp::{Server, router};
 pub use params::{Call, Params};

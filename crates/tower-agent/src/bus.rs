@@ -383,6 +383,7 @@ mod tests {
                         reply_to: None,
                     }],
                     session: params.session.clone(),
+                    cost_usd: None,
                 }),
                 None => Ok(Outcome::from_reply("reacted", params.session.clone())),
             }

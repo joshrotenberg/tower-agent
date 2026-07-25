@@ -126,6 +126,7 @@ fn parse_report(json: &str, session: Option<String>) -> Outcome {
             reply: raw.reply,
             posts: raw.posts,
             session,
+            cost_usd: None,
         },
         Err(_) => Outcome::from_reply(json, session),
     }
@@ -180,14 +181,17 @@ impl Backend for CodexBackend {
 
         let qr = result.map_err(|e| BackendError::new(format!("codex run failed: {e}")))?;
         let text = result_text(&qr);
+        let cost = qr.cost_usd;
         // Codex reports a session as `session_id` or, on newer CLIs, `thread_id`;
         // either resumes the thread.
         let session = qr.session_id.or(qr.thread_id);
-        Ok(if params.structured {
+        let mut outcome = if params.structured {
             parse_report(&text, session)
         } else {
             Outcome::from_reply(text, session)
-        })
+        };
+        outcome.cost_usd = cost;
+        Ok(outcome)
     }
 }
 
