@@ -134,6 +134,10 @@ fn parse_report(json: &str, session: Option<String>) -> Outcome {
 
 #[async_trait]
 impl Backend for CodexBackend {
+    fn name(&self) -> &str {
+        "codex"
+    }
+
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
         let codex = self.build_codex(params)?;
         let prompt = compose_prompt(params);

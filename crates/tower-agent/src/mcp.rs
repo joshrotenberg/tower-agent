@@ -80,10 +80,23 @@ impl Server {
         {
             return Err(RunError::UnknownAgent(agent.clone()));
         }
-        if let Some(session) = &call.session
-            && !self.sessions.exists(session)
-        {
-            return Err(RunError::UnknownSession(session.clone()));
+        if let Some(session) = &call.session {
+            if !self.sessions.exists(session) {
+                return Err(RunError::UnknownSession(session.clone()));
+            }
+            // Refuse to resume a session created under a different backend; its
+            // token means nothing here. A session with no recorded backend (an
+            // older record) is allowed.
+            if let Some(found) = self.sessions.get(session).and_then(|s| s.backend) {
+                let expected = self.backend.name();
+                if found != expected {
+                    return Err(RunError::BackendMismatch {
+                        session: session.clone(),
+                        found,
+                        expected: expected.to_string(),
+                    });
+                }
+            }
         }
         // Contain client-provided paths to the allowed root, if one is set.
         if let Some(root) = &self.root {
@@ -124,7 +137,8 @@ impl Server {
     fn finish(&self, id: String, agent: Option<String>, mut outcome: Outcome) -> Outcome {
         let backend_token = outcome.session.take();
         let last = preview(&outcome.reply);
-        self.sessions.record_turn(&id, agent, backend_token, last);
+        self.sessions
+            .record_turn(&id, agent, backend_token, last, Some(self.backend.name()));
         outcome.session = Some(id);
         outcome
     }
@@ -939,6 +953,54 @@ mod tests {
         // Cost is recorded on the runs.
         let runs = server.runs().list(10);
         assert_eq!(runs[0].cost_usd, Some(0.6));
+    }
+
+    #[tokio::test]
+    async fn resume_under_a_different_backend_is_rejected() {
+        struct Named(&'static str);
+        #[async_trait::async_trait]
+        impl Backend for Named {
+            fn name(&self) -> &str {
+                self.0
+            }
+            async fn run(&self, _p: &crate::Params) -> Result<Outcome, crate::BackendError> {
+                Ok(Outcome::from_reply("ok", None))
+            }
+        }
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        let alpha =
+            Server::with_sessions(Config::default(), Arc::new(Named("alpha")), store.clone());
+        let beta = Server::with_sessions(Config::default(), Arc::new(Named("beta")), store.clone());
+
+        let out = alpha
+            .run(Call {
+                prompt: "hi".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = out.session.unwrap();
+
+        // Same backend resumes fine.
+        alpha
+            .run(Call {
+                prompt: "again".into(),
+                session: Some(id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // A different backend is refused.
+        let err = beta
+            .run(Call {
+                prompt: "again".into(),
+                session: Some(id),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(err, Err(crate::RunError::BackendMismatch { .. })));
     }
 
     #[tokio::test]

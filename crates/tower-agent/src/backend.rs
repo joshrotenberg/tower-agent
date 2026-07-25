@@ -104,6 +104,12 @@ pub enum Event {
 /// The one seam where a model backend lives.
 #[async_trait]
 pub trait Backend: Send + Sync {
+    /// A short name identifying this backend, used to tag sessions so one is not
+    /// resumed under a different backend.
+    fn name(&self) -> &str {
+        "backend"
+    }
+
     /// Run a prompt to completion and return the outcome.
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError>;
 
@@ -128,6 +134,10 @@ pub struct StubBackend;
 
 #[async_trait]
 impl Backend for StubBackend {
+    fn name(&self) -> &str {
+        "stub"
+    }
+
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
         let reply = serde_json::to_string_pretty(params)
             .map_err(|e| BackendError::new(format!("serialize params: {e}")))?;
