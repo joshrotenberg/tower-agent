@@ -12,6 +12,9 @@ pub enum RunError {
     /// The call named an agent that is not configured.
     #[error("unknown agent: {0}")]
     UnknownAgent(String),
+    /// The call named a session that does not exist.
+    #[error("unknown session: {0}")]
+    UnknownSession(String),
     /// The prompt was empty or only whitespace.
     #[error("prompt must not be empty")]
     EmptyPrompt,

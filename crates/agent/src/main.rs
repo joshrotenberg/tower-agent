@@ -1,16 +1,16 @@
 //! `agent`: the reference binary for tower-agent.
 //!
 //! Loads config (server defaults and named agents), picks a backend, and either
-//! runs a single prompt (`run`) or serves the agent server over stdio (`serve`).
-//! M0 ships the stub backend only, so the whole surface works without a live
-//! model; the claude backend lands in M1.
+//! runs a single prompt (`run`), lists agents or sessions, or serves the agent
+//! server over stdio (`serve`). Sessions persist to a JSON file so threads
+//! resume across invocations; `--backend stub` runs without a live model.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use tower_agent::{Backend, Call, Config, Server, StubBackend};
+use tower_agent::{Backend, Call, Config, FileSessionStore, Server, StubBackend};
 use tower_agent_claude::ClaudeBackend;
 
 #[derive(Parser)]
@@ -22,6 +22,9 @@ struct Cli {
     /// Which backend runs prompts.
     #[arg(long, value_enum, default_value_t = BackendKind::Claude)]
     backend: BackendKind,
+    /// Session registry file, so threads resume across invocations.
+    #[arg(long, default_value = ".agent/sessions.json")]
+    sessions: PathBuf,
     /// Per-run backend timeout, in seconds.
     #[arg(long, default_value_t = 600)]
     timeout: u64,
@@ -58,6 +61,8 @@ enum Cmd {
         #[arg(long)]
         session: Option<String>,
     },
+    /// List the sessions (threads) in the registry.
+    Sessions,
     /// Serve the agent server over stdio (MCP).
     Serve,
 }
@@ -86,7 +91,8 @@ async fn main() -> anyhow::Result<()> {
         BackendKind::Stub => Arc::new(StubBackend),
         BackendKind::Claude => Arc::new(ClaudeBackend::new(Duration::from_secs(cli.timeout))),
     };
-    let server = Server::new(config, backend);
+    let sessions = Arc::new(FileSessionStore::open(&cli.sessions));
+    let server = Server::with_sessions(config, backend, sessions);
 
     match cli.cmd {
         Cmd::List => {
@@ -118,6 +124,20 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("run: {e}"))?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
+        Cmd::Sessions => {
+            let sessions = server.sessions().list();
+            if sessions.is_empty() {
+                eprintln!("no sessions");
+            }
+            for s in sessions {
+                let agent = s.agent.as_deref().unwrap_or("-");
+                let last = s.last.as_deref().unwrap_or("");
+                println!(
+                    "{:<6} agent={:<12} turns={:<3} {}",
+                    s.id, agent, s.turns, last
+                );
+            }
         }
         Cmd::Serve => {
             let router = server.router();
