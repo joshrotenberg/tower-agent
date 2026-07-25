@@ -177,7 +177,10 @@ impl Backend for ClaudeBackend {
 
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
         let claude = self.build_claude(params)?;
-        let mut cmd = build_query(params);
+        // Send the prompt over stdin so it does not appear in argv (visible to
+        // `ps` and crash dumps). The streaming path cannot do this yet (the
+        // wrapper nulls the child's stdin there), so it stays argv for now.
+        let mut cmd = build_query(params).prompt_via_stdin(true);
         if params.structured {
             cmd = cmd
                 .json_schema(report_schema())
