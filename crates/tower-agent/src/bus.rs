@@ -5,10 +5,12 @@
 //! channel; every agent subscribed to that channel runs with the message as its
 //! prompt, and its reply is recorded back on the channel, visible in the feed.
 //!
-//! This is the one-hop bus: a broadcast fires subscribers, which react. An
-//! agent's own posts re-triggering subscribers (the cascade) and its depth bound
-//! are a later slice; kept one-hop here so it is safe without a bound. Execution
-//! is serial: one background worker drains a queue.
+//! A fired agent runs structured, so it can emit posts of its own. Each post is
+//! recorded and, within a depth bound, fires its recipients (the cascade), so
+//! agents converse; the bound turns a runaway loop into a log line. A post
+//! reaches the subscribers of its channel plus a directed `to`, and threads via
+//! `reply_to`. A fired turn is given the recent channel history as context.
+//! Execution is serial: one background worker drains a queue.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -248,6 +250,28 @@ impl Server {
     }
 }
 
+/// Render recent channel messages as context for a fired turn, so the agent
+/// sees the thread it is part of, newest last.
+fn context(history: &[Message], channel: &str) -> String {
+    if history.is_empty() {
+        return String::new();
+    }
+    let mut s = format!("Recent messages on channel '{channel}' (newest last):\n");
+    for m in history {
+        let to =
+            m.to.as_deref()
+                .map(|t| format!(" -> {t}"))
+                .unwrap_or_default();
+        let re = m
+            .reply_to
+            .map(|r| format!(" (re #{r})"))
+            .unwrap_or_default();
+        s.push_str(&format!("[#{}] <{}>{to}{re}: {}\n", m.id, m.from, m.body));
+    }
+    s.push('\n');
+    s
+}
+
 async fn bus_worker(server: Server, mut rx: UnboundedReceiver<Job>) {
     while let Some(Job::Fire {
         agent,
@@ -256,9 +280,13 @@ async fn bus_worker(server: Server, mut rx: UnboundedReceiver<Job>) {
     }) = rx.recv().await
     {
         let session = server.bus.sessions.lock().unwrap().get(&agent).cloned();
+        // Give the turn the recent thread on this channel, not just its trigger.
+        let history = server.feed(Some(&message.channel), 20);
         let prompt = format!(
-            "Message #{} on channel '{}' from {}:\n\n{}",
-            message.id, message.channel, message.from, message.body
+            "{}You were addressed by message #{} from {}. Respond per your instructions.",
+            context(&history, &message.channel),
+            message.id,
+            message.from
         );
         let call = Call {
             prompt,
@@ -441,6 +469,49 @@ mod tests {
             feed.len() <= 2 + MAX_DEPTH + 1,
             "the cascade is bounded: {}",
             feed.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fired_turn_sees_recent_channel_history() {
+        // A backend that records the prompt it was given.
+        struct Capture {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl Backend for Capture {
+            async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
+                self.seen.lock().unwrap().push(params.prompt.clone());
+                Ok(Outcome::from_reply("ok", params.session.clone()))
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let config = Config::parse(
+            r#"
+            [agents.watcher]
+            system = "watch"
+            subscriptions = ["board"]
+            "#,
+        )
+        .unwrap();
+        let server = Server::new(config, Arc::new(Capture { seen: seen.clone() }));
+        let bus = server.spawn_bus();
+
+        server.broadcast("board", "operator", None, "first message");
+        server.wait_idle().await;
+        server.broadcast("board", "operator", None, "second message");
+        server.wait_idle().await;
+        bus.abort();
+
+        let prompts = seen.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2);
+        // The second turn's prompt carries the earlier exchange as context.
+        assert!(prompts[1].contains("first message"), "{}", prompts[1]);
+        assert!(
+            prompts[1].contains("Recent messages on channel 'board'"),
+            "{}",
+            prompts[1]
         );
     }
 }
