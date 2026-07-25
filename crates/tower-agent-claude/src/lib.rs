@@ -171,6 +171,10 @@ fn classify(event: &StreamEvent, turn: &mut u32) -> Vec<Event> {
 
 #[async_trait]
 impl Backend for ClaudeBackend {
+    fn name(&self) -> &str {
+        "claude"
+    }
+
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
         let claude = self.build_claude(params)?;
         let mut cmd = build_query(params);

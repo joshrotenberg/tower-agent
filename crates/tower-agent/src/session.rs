@@ -23,6 +23,9 @@ pub struct SessionInfo {
     pub turns: u64,
     /// A short preview of the latest outcome text.
     pub last: Option<String>,
+    /// The backend that produced this session's resume token.
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 /// One stored session: its public info plus the backend resume token.
@@ -62,6 +65,7 @@ impl State {
         agent: Option<String>,
         backend_token: Option<String>,
         last: Option<String>,
+        backend: Option<&str>,
     ) {
         let rec = self
             .sessions
@@ -72,12 +76,16 @@ impl State {
                     agent: None,
                     turns: 0,
                     last: None,
+                    backend: None,
                 },
                 backend_token: None,
             });
         rec.info.turns += 1;
         if agent.is_some() {
             rec.info.agent = agent;
+        }
+        if backend.is_some() {
+            rec.info.backend = backend.map(str::to_string);
         }
         rec.info.last = last;
         rec.backend_token = backend_token;
@@ -101,13 +109,14 @@ pub trait SessionStore: Send + Sync {
     fn exists(&self, id: &str) -> bool;
     /// The backend resume token stored for this session, if any.
     fn backend_token(&self, id: &str) -> Option<String>;
-    /// Record a completed turn.
+    /// Record a completed turn. `backend` tags which backend produced the token.
     fn record_turn(
         &self,
         id: &str,
         agent: Option<String>,
         backend_token: Option<String>,
         last: Option<String>,
+        backend: Option<&str>,
     );
     /// One session by id.
     fn get(&self, id: &str) -> Option<SessionInfo>;
@@ -143,11 +152,12 @@ impl SessionStore for MemorySessionStore {
         agent: Option<String>,
         backend_token: Option<String>,
         last: Option<String>,
+        backend: Option<&str>,
     ) {
         self.state
             .lock()
             .unwrap()
-            .update(id, agent, backend_token, last);
+            .update(id, agent, backend_token, last, backend);
     }
     fn get(&self, id: &str) -> Option<SessionInfo> {
         self.state.lock().unwrap().get(id)
@@ -210,9 +220,10 @@ impl SessionStore for FileSessionStore {
         agent: Option<String>,
         backend_token: Option<String>,
         last: Option<String>,
+        backend: Option<&str>,
     ) {
         let mut state = self.state.lock().unwrap();
-        state.update(id, agent, backend_token, last);
+        state.update(id, agent, backend_token, last, backend);
         self.save(&state);
     }
     fn get(&self, id: &str) -> Option<SessionInfo> {
@@ -245,18 +256,21 @@ mod tests {
             Some("tester".into()),
             Some("bk-1".into()),
             Some("hi".into()),
+            Some("claude"),
         );
         assert!(s.exists(&id));
         let info = s.get(&id).unwrap();
         assert_eq!(info.turns, 1);
         assert_eq!(info.agent.as_deref(), Some("tester"));
+        assert_eq!(info.backend.as_deref(), Some("claude"));
         assert_eq!(s.backend_token(&id).as_deref(), Some("bk-1"));
 
         // A returning turn without an agent keeps the original and bumps.
-        s.record_turn(&id, None, Some("bk-2".into()), Some("bye".into()));
+        s.record_turn(&id, None, Some("bk-2".into()), Some("bye".into()), None);
         let info = s.get(&id).unwrap();
         assert_eq!(info.turns, 2);
         assert_eq!(info.agent.as_deref(), Some("tester"));
+        assert_eq!(info.backend.as_deref(), Some("claude"));
         assert_eq!(s.backend_token(&id).as_deref(), Some("bk-2"));
     }
 
@@ -274,6 +288,7 @@ mod tests {
                 Some("scout".into()),
                 Some("bk-9".into()),
                 Some("done".into()),
+                Some("claude"),
             );
             id
         };

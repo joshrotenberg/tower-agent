@@ -24,6 +24,13 @@ pub enum RunError {
     /// A client-provided path is outside the allowed root, or does not exist.
     #[error("path not allowed: {0}")]
     PathNotAllowed(String),
+    /// The session was created under a different backend than the server's.
+    #[error("session {session} belongs to backend {found}, not {expected}")]
+    BackendMismatch {
+        session: String,
+        found: String,
+        expected: String,
+    },
     /// The backend failed to run the prompt.
     #[error(transparent)]
     Backend(#[from] BackendError),
