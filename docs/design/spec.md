@@ -227,6 +227,9 @@ a live model.
   the spine), richer stream events (done, #13), the codex backend (done, #14, one
   proven live). M5 complete.
 - **M6** provoke on a real repo; add only the mechanical layers failures name.
+  (first run done, #15: see `docs/design/first-run.md`. Output quality high;
+  failures named budget/turn caps (#20), the gate (#19), path validation (#34),
+  and conversation ergonomics (#35). Keep provoking.)
 
 ## Open questions
 
