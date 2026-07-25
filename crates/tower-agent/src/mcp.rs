@@ -31,6 +31,8 @@ pub struct Server {
     pub(crate) bus: Bus,
     pub(crate) runs: Arc<Runs>,
     pub(crate) budget: Arc<Budget>,
+    /// The canonical allowed root for client-provided paths, if containment is on.
+    pub(crate) root: Option<std::path::PathBuf>,
 }
 
 impl Server {
@@ -46,6 +48,11 @@ impl Server {
         sessions: Arc<dyn SessionStore>,
     ) -> Self {
         let budget = Arc::new(Budget::new(config.budget.max_usd));
+        let root = config
+            .security
+            .root
+            .as_ref()
+            .map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| std::path::PathBuf::from(r)));
         Server {
             config: Arc::new(config),
             backend,
@@ -53,6 +60,7 @@ impl Server {
             bus: Bus::new(),
             runs: Arc::new(Runs::new()),
             budget,
+            root,
         }
     }
 
@@ -76,6 +84,15 @@ impl Server {
             && !self.sessions.exists(session)
         {
             return Err(RunError::UnknownSession(session.clone()));
+        }
+        // Contain client-provided paths to the allowed root, if one is set.
+        if let Some(root) = &self.root {
+            if let Some(cwd) = &call.cwd {
+                contained(cwd, root)?;
+            }
+            for dir in call.add_dirs.iter().flatten() {
+                contained(dir, root)?;
+            }
         }
         Ok(())
     }
@@ -316,6 +333,18 @@ fn feed_tool(server: Server) -> Tool {
             },
         )
         .build()
+}
+
+/// A client-provided path must canonicalize to inside `root`, or it is rejected.
+/// Canonicalization resolves `..` and symlinks and requires the path to exist.
+fn contained(path: &str, root: &std::path::Path) -> Result<(), RunError> {
+    let canon =
+        std::fs::canonicalize(path).map_err(|_| RunError::PathNotAllowed(path.to_string()))?;
+    if canon.starts_with(root) {
+        Ok(())
+    } else {
+        Err(RunError::PathNotAllowed(path.to_string()))
+    }
 }
 
 /// A one-line, length-capped preview of an outcome, for the session registry.
@@ -910,6 +939,52 @@ mod tests {
         // Cost is recorded on the runs.
         let runs = server.runs().list(10);
         assert_eq!(runs[0].cost_usd, Some(0.6));
+    }
+
+    #[tokio::test]
+    async fn no_security_root_allows_any_path() {
+        // server() sets no [security] root, so a client path passes unchecked.
+        let mut c = client().await;
+        let p = resolved(&mut c, json!({ "prompt": "go", "cwd": "/anywhere/fake" })).await;
+        assert_eq!(p["cwd"], "/anywhere/fake");
+    }
+
+    #[tokio::test]
+    async fn security_root_contains_client_paths() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("tower-agent-contain-{}", std::process::id()));
+        let inside = base.join("inside");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&inside).unwrap();
+
+        let config =
+            Config::parse(&format!("[security]\nroot = \"{}\"\n", base.display())).unwrap();
+        let mut client =
+            TestClient::from_router(Server::new(config, Arc::new(StubBackend)).router());
+        client.initialize().await;
+
+        // Inside the root: accepted.
+        let ok: Value = client
+            .call_tool_typed(
+                "prompt",
+                json!({ "prompt": "go", "cwd": inside.to_str().unwrap() }),
+            )
+            .await;
+        assert!(ok["reply"].is_string());
+
+        // Outside the root: rejected.
+        let _e1: Value = client
+            .call_tool_expect_error("prompt", json!({ "prompt": "go", "cwd": "/tmp" }))
+            .await;
+        // Nonexistent: rejected.
+        let _e2: Value = client
+            .call_tool_expect_error(
+                "prompt",
+                json!({ "prompt": "go", "cwd": base.join("nope").to_str().unwrap() }),
+            )
+            .await;
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

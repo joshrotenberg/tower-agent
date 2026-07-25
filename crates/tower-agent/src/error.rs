@@ -21,6 +21,9 @@ pub enum RunError {
     /// The server's budget cap has been reached.
     #[error("budget exceeded")]
     BudgetExceeded,
+    /// A client-provided path is outside the allowed root, or does not exist.
+    #[error("path not allowed: {0}")]
+    PathNotAllowed(String),
     /// The backend failed to run the prompt.
     #[error(transparent)]
     Backend(#[from] BackendError),

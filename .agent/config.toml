@@ -11,6 +11,11 @@ max_turns = 20
 # [budget]
 # max_usd = 5.0
 
+# Contain client-provided cwd/add_dirs to a root. When set, a call's paths must
+# canonicalize to inside this directory or the call is rejected.
+# [security]
+# root = "/Users/me/Code"
+
 [agents.scout]
 system = "You are a scout. Read the repository and report what you find, concisely."
 model = "haiku"

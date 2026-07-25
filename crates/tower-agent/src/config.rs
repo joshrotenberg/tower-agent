@@ -21,7 +21,19 @@ pub struct Config {
     #[serde(default)]
     pub budget: BudgetConfig,
     #[serde(default)]
+    pub security: SecurityConfig,
+    #[serde(default)]
     pub agents: BTreeMap<String, AgentDef>,
+}
+
+/// Trust-boundary policy for client-provided paths.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityConfig {
+    /// If set, a client-provided `cwd` or `add_dirs` entry must canonicalize to a
+    /// path inside this root, or the call is rejected. Operator-set config paths
+    /// are trusted and not checked.
+    pub root: Option<String>,
 }
 
 /// The server-wide spend cap.
