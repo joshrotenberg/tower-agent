@@ -20,6 +20,7 @@ pub mod config;
 pub mod error;
 pub mod mcp;
 pub mod params;
+pub mod run;
 pub mod schedule;
 pub mod session;
 
@@ -29,5 +30,6 @@ pub use config::{AgentDef, Config, Defaults, ScheduledAgent};
 pub use error::RunError;
 pub use mcp::{Server, router};
 pub use params::{Call, Params};
+pub use run::{Run, RunKind, RunStatus, Runs};
 pub use schedule::{ScheduleError, SchedulerHandle};
 pub use session::{FileSessionStore, MemorySessionStore, SessionInfo, SessionStore};

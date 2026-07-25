@@ -17,16 +17,18 @@ use crate::bus::Bus;
 use crate::config::Config;
 use crate::error::RunError;
 use crate::params::{Call, Params};
+use crate::run::{RunKind, RunStatus, Runs};
 use crate::session::{MemorySessionStore, SessionStore};
 
-/// The server: a config, a backend, a session store, and a bus. Cheap to clone
-/// (all are shared).
+/// The server: a config, a backend, a session store, a bus, and a run registry.
+/// Cheap to clone (all are shared).
 #[derive(Clone)]
 pub struct Server {
     pub(crate) config: Arc<Config>,
     pub(crate) backend: Arc<dyn Backend>,
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) bus: Bus,
+    pub(crate) runs: Arc<Runs>,
 }
 
 impl Server {
@@ -46,6 +48,7 @@ impl Server {
             backend,
             sessions,
             bus: Bus::new(),
+            runs: Arc::new(Runs::new()),
         }
     }
 
@@ -105,21 +108,40 @@ impl Server {
         outcome
     }
 
-    /// Resolve a call against config and run it through the backend. This is the
-    /// atom; the MCP `prompt` tool is a thin wrapper over it. A fresh call mints
-    /// a session and returns its id; passing that id back continues the thread.
+    /// Resolve a call against config and run it through the backend, recording a
+    /// run of the given kind. The shared path behind `run`, `run_structured`, and
+    /// `tick`.
+    async fn run_with(
+        &self,
+        call: Call,
+        structured: bool,
+        kind: RunKind,
+    ) -> Result<Outcome, RunError> {
+        let (id, agent, params) = self.prepare(call, structured)?;
+        let run_id = self.runs.start(agent.clone(), Some(id.clone()), kind);
+        let result = self.backend.run(&params).await;
+        match &result {
+            Ok(o) => self
+                .runs
+                .finish(&run_id, RunStatus::Done, Some(o.summary.clone())),
+            Err(e) => self
+                .runs
+                .finish(&run_id, RunStatus::Failed, Some(e.to_string())),
+        }
+        Ok(self.finish(id, agent, result?))
+    }
+
+    /// Run a call through the backend. This is the atom; the MCP `prompt` tool is
+    /// a thin wrapper over it. A fresh call mints a session and returns its id;
+    /// passing that id back continues the thread.
     pub async fn run(&self, call: Call) -> Result<Outcome, RunError> {
-        let (id, agent, params) = self.prepare(call, false)?;
-        let outcome = self.backend.run(&params).await?;
-        Ok(self.finish(id, agent, outcome))
+        self.run_with(call, false, RunKind::Invoke).await
     }
 
     /// Like [`Server::run`], but asking the backend for a structured result so
     /// the agent can emit `posts`. Used by the bus for a fired turn.
     pub(crate) async fn run_structured(&self, call: Call) -> Result<Outcome, RunError> {
-        let (id, agent, params) = self.prepare(call, true)?;
-        let outcome = self.backend.run(&params).await?;
-        Ok(self.finish(id, agent, outcome))
+        self.run_with(call, true, RunKind::Subscribe).await
     }
 
     /// Like [`Server::run`], but emitting incremental [`Event`]s to `events` as
@@ -131,13 +153,29 @@ impl Server {
         events: UnboundedSender<Event>,
     ) -> Result<Outcome, RunError> {
         let (id, agent, params) = self.prepare(call, false)?;
-        let outcome = self.backend.run_streaming(&params, events).await?;
-        Ok(self.finish(id, agent, outcome))
+        let run_id = self
+            .runs
+            .start(agent.clone(), Some(id.clone()), RunKind::Invoke);
+        let result = self.backend.run_streaming(&params, events).await;
+        match &result {
+            Ok(o) => self
+                .runs
+                .finish(&run_id, RunStatus::Done, Some(o.summary.clone())),
+            Err(e) => self
+                .runs
+                .finish(&run_id, RunStatus::Failed, Some(e.to_string())),
+        }
+        Ok(self.finish(id, agent, result?))
     }
 
     /// The session registry: all threads, or one by id.
     pub fn sessions(&self) -> Arc<dyn SessionStore> {
         self.sessions.clone()
+    }
+
+    /// The run registry: recent runs, or one by id.
+    pub fn runs(&self) -> Arc<Runs> {
+        self.runs.clone()
     }
 
     /// The agents that carry a schedule.
@@ -154,7 +192,7 @@ impl Server {
             session,
             ..Default::default()
         };
-        self.run(call).await
+        self.run_with(call, false, RunKind::Schedule).await
     }
 
     /// Build the MCP router that exposes this server.
@@ -184,8 +222,36 @@ pub fn router(server: Server) -> McpRouter {
         .tool(prompt_tool(server.clone()))
         .tool(agents_tool(server.clone()))
         .tool(sessions_tool(server.clone()))
+        .tool(runs_tool(server.clone()))
         .tool(broadcast_tool(server.clone()))
         .tool(feed_tool(server))
+}
+
+#[derive(serde::Deserialize, JsonSchema)]
+struct RunsInput {
+    /// One run by id; omit to list recent runs.
+    #[serde(default)]
+    id: Option<String>,
+    /// How many recent runs (default 50).
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn runs_tool(server: Server) -> Tool {
+    ToolBuilder::new("runs")
+        .description("Recent runs (invoke, schedule, subscribe), or one by id")
+        .extractor_handler(
+            server,
+            |State(server): State<Server>, Json(input): Json<RunsInput>| async move {
+                match input.id {
+                    Some(id) => CallToolResult::from_serialize(&server.runs.get(&id)),
+                    None => {
+                        CallToolResult::from_serialize(&server.runs.list(input.limit.unwrap_or(50)))
+                    }
+                }
+            },
+        )
+        .build()
 }
 
 #[derive(serde::Deserialize, JsonSchema)]
@@ -696,6 +762,41 @@ mod tests {
             created["task"]["taskId"].as_str().is_some(),
             "task-augmented call should return a task handle: {created}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_records_a_run() {
+        let mut c = client().await;
+        let _: Value = c.call_tool_typed("prompt", json!({ "prompt": "go" })).await;
+        let runs: Vec<Value> = c.call_tool_typed("runs", json!({})).await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["kind"], "invoke");
+        assert_eq!(runs[0]["status"], "done");
+        assert!(runs[0]["summary"].is_string());
+        assert!(runs[0]["ended_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_is_recorded_failed() {
+        struct Boom;
+        #[async_trait::async_trait]
+        impl Backend for Boom {
+            async fn run(&self, _p: &crate::Params) -> Result<Outcome, crate::BackendError> {
+                Err(crate::BackendError::new("boom"))
+            }
+        }
+
+        let server = Server::new(Config::default(), Arc::new(Boom));
+        let mut client = TestClient::from_router(server.clone().router());
+        client.initialize().await;
+        let _err: Value = client
+            .call_tool_expect_error("prompt", json!({ "prompt": "go" }))
+            .await;
+
+        let runs = server.runs().list(10);
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(runs[0].status, crate::RunStatus::Failed));
+        assert_eq!(runs[0].summary.as_deref(), Some("boom"));
     }
 
     #[tokio::test]
