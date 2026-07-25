@@ -47,6 +47,9 @@ pub struct Run {
     /// The outcome summary, or the error message on failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// The run's cost in USD, if the backend reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// An in-memory, capped registry of runs.
@@ -77,6 +80,7 @@ impl Runs {
             started_at: now(),
             ended_at: None,
             summary: None,
+            cost_usd: None,
         };
         let mut q = self.inner.lock().unwrap();
         q.push_back(run);
@@ -87,12 +91,19 @@ impl Runs {
     }
 
     /// Record the end of a run.
-    pub fn finish(&self, id: &str, status: RunStatus, summary: Option<String>) {
+    pub fn finish(
+        &self,
+        id: &str,
+        status: RunStatus,
+        summary: Option<String>,
+        cost_usd: Option<f64>,
+    ) {
         let mut q = self.inner.lock().unwrap();
         if let Some(run) = q.iter_mut().find(|r| r.id == id) {
             run.status = status;
             run.ended_at = Some(now());
             run.summary = summary;
+            run.cost_usd = cost_usd;
         }
     }
 
@@ -133,11 +144,17 @@ mod tests {
         assert!(matches!(run.status, RunStatus::Running));
         assert!(run.ended_at.is_none());
 
-        runs.finish(&id, RunStatus::Done, Some("did the thing".into()));
+        runs.finish(
+            &id,
+            RunStatus::Done,
+            Some("did the thing".into()),
+            Some(0.02),
+        );
         let run = runs.get(&id).unwrap();
         assert!(matches!(run.status, RunStatus::Done));
         assert!(run.ended_at.is_some());
         assert_eq!(run.summary.as_deref(), Some("did the thing"));
+        assert_eq!(run.cost_usd, Some(0.02));
     }
 
     #[test]

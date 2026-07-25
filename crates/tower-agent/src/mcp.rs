@@ -13,6 +13,7 @@ use tower_mcp::extract::{Context, Json, State};
 use tower_mcp::{CallToolResult, Error, McpRouter, NoParams, TaskSupportMode, Tool, ToolBuilder};
 
 use crate::backend::{Backend, Event, Outcome};
+use crate::budget::Budget;
 use crate::bus::Bus;
 use crate::config::Config;
 use crate::error::RunError;
@@ -20,8 +21,8 @@ use crate::params::{Call, Params};
 use crate::run::{RunKind, RunStatus, Runs};
 use crate::session::{MemorySessionStore, SessionStore};
 
-/// The server: a config, a backend, a session store, a bus, and a run registry.
-/// Cheap to clone (all are shared).
+/// The server: a config, a backend, a session store, a bus, a run registry, and a
+/// budget. Cheap to clone (all are shared).
 #[derive(Clone)]
 pub struct Server {
     pub(crate) config: Arc<Config>,
@@ -29,6 +30,7 @@ pub struct Server {
     pub(crate) sessions: Arc<dyn SessionStore>,
     pub(crate) bus: Bus,
     pub(crate) runs: Arc<Runs>,
+    pub(crate) budget: Arc<Budget>,
 }
 
 impl Server {
@@ -43,12 +45,14 @@ impl Server {
         backend: Arc<dyn Backend>,
         sessions: Arc<dyn SessionStore>,
     ) -> Self {
+        let budget = Arc::new(Budget::new(config.budget.max_usd));
         Server {
             config: Arc::new(config),
             backend,
             sessions,
             bus: Bus::new(),
             runs: Arc::new(Runs::new()),
+            budget,
         }
     }
 
@@ -117,18 +121,31 @@ impl Server {
         structured: bool,
         kind: RunKind,
     ) -> Result<Outcome, RunError> {
+        if self.budget.exhausted() {
+            return Err(RunError::BudgetExceeded);
+        }
         let (id, agent, params) = self.prepare(call, structured)?;
         let run_id = self.runs.start(agent.clone(), Some(id.clone()), kind);
         let result = self.backend.run(&params).await;
-        match &result {
-            Ok(o) => self
-                .runs
-                .finish(&run_id, RunStatus::Done, Some(o.summary.clone())),
+        self.account(&run_id, &result);
+        Ok(self.finish(id, agent, result?))
+    }
+
+    /// Record a finished run's cost and status: bump the budget and the run
+    /// registry.
+    fn account(&self, run_id: &str, result: &Result<Outcome, crate::BackendError>) {
+        match result {
+            Ok(o) => {
+                if let Some(cost) = o.cost_usd {
+                    self.budget.record(cost);
+                }
+                self.runs
+                    .finish(run_id, RunStatus::Done, Some(o.summary.clone()), o.cost_usd);
+            }
             Err(e) => self
                 .runs
-                .finish(&run_id, RunStatus::Failed, Some(e.to_string())),
+                .finish(run_id, RunStatus::Failed, Some(e.to_string()), None),
         }
-        Ok(self.finish(id, agent, result?))
     }
 
     /// Run a call through the backend. This is the atom; the MCP `prompt` tool is
@@ -152,19 +169,15 @@ impl Server {
         call: Call,
         events: UnboundedSender<Event>,
     ) -> Result<Outcome, RunError> {
+        if self.budget.exhausted() {
+            return Err(RunError::BudgetExceeded);
+        }
         let (id, agent, params) = self.prepare(call, false)?;
         let run_id = self
             .runs
             .start(agent.clone(), Some(id.clone()), RunKind::Invoke);
         let result = self.backend.run_streaming(&params, events).await;
-        match &result {
-            Ok(o) => self
-                .runs
-                .finish(&run_id, RunStatus::Done, Some(o.summary.clone())),
-            Err(e) => self
-                .runs
-                .finish(&run_id, RunStatus::Failed, Some(e.to_string())),
-        }
+        self.account(&run_id, &result);
         Ok(self.finish(id, agent, result?))
     }
 
@@ -176,6 +189,11 @@ impl Server {
     /// The run registry: recent runs, or one by id.
     pub fn runs(&self) -> Arc<Runs> {
         self.runs.clone()
+    }
+
+    /// The server budget: cumulative spend and the cap.
+    pub fn budget(&self) -> Arc<Budget> {
+        self.budget.clone()
     }
 
     /// The agents that carry a schedule.
@@ -681,6 +699,7 @@ mod tests {
                         reply_to: Some(3),
                     }],
                     session: None,
+                    cost_usd: None,
                 })
             }
         }
@@ -850,6 +869,47 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert!(matches!(runs[0].status, crate::RunStatus::Failed));
         assert_eq!(runs[0].summary.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn budget_cap_rejects_once_reached_and_records_cost() {
+        struct Costed;
+        #[async_trait::async_trait]
+        impl Backend for Costed {
+            async fn run(&self, _p: &crate::Params) -> Result<Outcome, crate::BackendError> {
+                let mut o = Outcome::from_reply("ok", None);
+                o.cost_usd = Some(0.6);
+                Ok(o)
+            }
+        }
+
+        let config = Config::parse("[budget]\nmax_usd = 1.0\n").unwrap();
+        let server = Server::new(config, Arc::new(Costed));
+
+        // Two runs (0.6 each) reach the 1.0 cap.
+        for prompt in ["a", "b"] {
+            server
+                .run(Call {
+                    prompt: prompt.into(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        assert!(server.budget().spent() >= 1.0);
+
+        // The next run is rejected.
+        let err = server
+            .run(Call {
+                prompt: "c".into(),
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(err, Err(crate::RunError::BudgetExceeded)));
+
+        // Cost is recorded on the runs.
+        let runs = server.runs().list(10);
+        assert_eq!(runs[0].cost_usd, Some(0.6));
     }
 
     #[tokio::test]

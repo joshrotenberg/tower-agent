@@ -18,6 +18,9 @@ pub enum RunError {
     /// The prompt was empty or only whitespace.
     #[error("prompt must not be empty")]
     EmptyPrompt,
+    /// The server's budget cap has been reached.
+    #[error("budget exceeded")]
+    BudgetExceeded,
     /// The backend failed to run the prompt.
     #[error(transparent)]
     Backend(#[from] BackendError),

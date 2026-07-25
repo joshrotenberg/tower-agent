@@ -7,6 +7,10 @@ effort = "medium"
 cwd = "."
 max_turns = 20
 
+# A server-wide spend cap: once cumulative cost reaches this, runs are rejected.
+# [budget]
+# max_usd = 5.0
+
 [agents.scout]
 system = "You are a scout. Read the repository and report what you find, concisely."
 model = "haiku"
