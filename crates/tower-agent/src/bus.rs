@@ -425,6 +425,14 @@ mod tests {
         assert_eq!(feed[1].from, "watcher");
         assert!(feed[1].body.contains("reacted to"));
         assert_eq!(feed[1].reply_to, Some(feed[0].id));
+
+        // A bus fire is recorded as a subscribe run.
+        let runs = server.runs().list(10);
+        assert!(
+            runs.iter()
+                .any(|r| matches!(r.kind, crate::run::RunKind::Subscribe)),
+            "{runs:?}"
+        );
     }
 
     #[tokio::test]

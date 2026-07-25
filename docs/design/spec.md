@@ -223,7 +223,8 @@ a live model.
   the subscribe trigger (done, #7), directed threads and the depth-bounded
   cascade with structured production (done, #8 + #9). Turn context (#10) and the
   rest of the feed/broadcast surface (#11) remain.
-- **M5** observability rounded out (feed/idle over MCP); the codex backend.
+- **M5** observability and portability: the run registry (done, #12, run id as
+  the spine), richer stream events (#13), the codex backend (#14).
 - **M6** provoke on a real repo; add only the mechanical layers failures name.
 
 ## Open questions
