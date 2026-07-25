@@ -17,7 +17,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, StreamEvent, stream_query};
+use claude_wrapper::streaming::{
+    BlockDelta, BlockType, PartialMessageEvent, StreamEvent, stream_query,
+};
 use claude_wrapper::types::{OutputFormat, QueryResult};
 use claude_wrapper::{Claude, Effort, QueryCommand};
 use tokio::sync::mpsc::UnboundedSender;
@@ -141,6 +143,31 @@ fn parse_report(json: &str, session: Option<String>) -> Outcome {
     }
 }
 
+/// Map a stream event to the tower-agent [`Event`]s it produces: a new assistant
+/// message is a turn boundary; a partial message carries text, thinking, or a
+/// tool-use start. `turn` counts assistant messages.
+fn classify(event: &StreamEvent, turn: &mut u32) -> Vec<Event> {
+    if event.event_type() == Some("assistant") {
+        *turn += 1;
+        return vec![Event::Turn { n: *turn }];
+    }
+    match event.partial_message() {
+        Some(PartialMessageEvent::BlockStart {
+            block_type: BlockType::ToolUse { name, .. },
+            ..
+        }) => vec![Event::ToolUse { name }],
+        Some(PartialMessageEvent::BlockDelta {
+            delta: BlockDelta::Text(t),
+            ..
+        }) => vec![Event::TextDelta(t)],
+        Some(PartialMessageEvent::BlockDelta {
+            delta: BlockDelta::Thinking(t),
+            ..
+        }) => vec![Event::Thinking(t)],
+        _ => vec![],
+    }
+}
+
 #[async_trait]
 impl Backend for ClaudeBackend {
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
@@ -179,6 +206,7 @@ impl Backend for ClaudeBackend {
         let mut final_result: Option<QueryResult> = None;
         let mut session_seen: Option<String> = None;
         let mut accumulated = String::new();
+        let mut turn = 0u32;
 
         let outcome = stream_query(&claude, &cmd, |event: StreamEvent| {
             if session_seen.is_none()
@@ -192,14 +220,12 @@ impl Backend for ClaudeBackend {
                 }
                 return;
             }
-            if let Some(PartialMessageEvent::BlockDelta {
-                delta: BlockDelta::Text(text),
-                ..
-            }) = event.partial_message()
-            {
-                accumulated.push_str(&text);
+            for ev in classify(&event, &mut turn) {
+                if let Event::TextDelta(t) = &ev {
+                    accumulated.push_str(t);
+                }
                 // The receiver may be gone (caller stopped listening); ignore.
-                let _ = events.send(Event::TextDelta(text));
+                let _ = events.send(ev);
             }
         })
         .await;
@@ -380,5 +406,73 @@ mod tests {
 
         let info = server.sessions().get(&id).expect("session in registry");
         assert_eq!(info.turns, 2);
+    }
+
+    #[test]
+    fn classify_counts_assistant_messages_as_turns() {
+        use serde_json::json;
+        let mut turn = 0;
+        let a1: StreamEvent = serde_json::from_value(json!({"type":"assistant"})).unwrap();
+        assert!(matches!(
+            classify(&a1, &mut turn).as_slice(),
+            [Event::Turn { n: 1 }]
+        ));
+        let a2: StreamEvent = serde_json::from_value(json!({"type":"assistant"})).unwrap();
+        assert!(matches!(
+            classify(&a2, &mut turn).as_slice(),
+            [Event::Turn { n: 2 }]
+        ));
+    }
+
+    #[test]
+    fn classify_maps_text_tool_and_thinking() {
+        use serde_json::json;
+        let mut turn = 0;
+
+        let text: StreamEvent = serde_json::from_value(
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}),
+        )
+        .unwrap();
+        assert!(
+            matches!(classify(&text, &mut turn).as_slice(), [Event::TextDelta(t)] if t.as_str() == "hi")
+        );
+
+        let tool: StreamEvent = serde_json::from_value(json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"x","name":"Bash"}})).unwrap();
+        assert!(
+            matches!(classify(&tool, &mut turn).as_slice(), [Event::ToolUse { name }] if name.as_str() == "Bash")
+        );
+
+        let think: StreamEvent = serde_json::from_value(json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}})).unwrap();
+        assert!(
+            matches!(classify(&think, &mut turn).as_slice(), [Event::Thinking(t)] if t.as_str() == "hmm")
+        );
+    }
+
+    // Live: a streamed run that uses a tool emits ToolUse and Turn events.
+    //   cargo test -p tower-agent-claude -- --ignored
+    #[tokio::test]
+    #[ignore = "needs the claude CLI and auth"]
+    async fn live_streaming_emits_tool_use() {
+        let backend = ClaudeBackend::new(Duration::from_secs(120));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let params = Params {
+            prompt: "Use the Bash tool to run: echo hello. Then reply done.".into(),
+            model: Some("haiku".into()),
+            allowed_tools: Some(vec!["Bash".into()]),
+            ..Default::default()
+        };
+        backend.run_streaming(&params, tx).await.expect("run");
+
+        let mut tool_uses = 0;
+        let mut turns = 0;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                Event::ToolUse { .. } => tool_uses += 1,
+                Event::Turn { .. } => turns += 1,
+                _ => {}
+            }
+        }
+        assert!(tool_uses >= 1, "expected a tool-use event");
+        assert!(turns >= 1, "expected a turn event");
     }
 }

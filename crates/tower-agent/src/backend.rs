@@ -87,6 +87,12 @@ fn summarize(reply: &str) -> String {
 pub enum Event {
     /// A chunk of assistant text as it is produced.
     TextDelta(String),
+    /// A chunk of extended-thinking text.
+    Thinking(String),
+    /// The agent started using a tool.
+    ToolUse { name: String },
+    /// A new agentic turn began (a new assistant message).
+    Turn { n: u32 },
     /// A human-readable status line.
     Status(String),
 }
