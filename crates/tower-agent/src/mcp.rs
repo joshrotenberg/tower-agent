@@ -74,8 +74,13 @@ impl Server {
     }
 
     /// Validate, pick the session id (mint a fresh one, or reuse the named one),
-    /// and resolve the params with the stored backend resume token.
-    fn prepare(&self, call: Call) -> Result<(String, Option<String>, Params), RunError> {
+    /// and resolve the params with the stored backend resume token. `structured`
+    /// asks the backend for a `{summary, reply, posts}` result.
+    fn prepare(
+        &self,
+        call: Call,
+        structured: bool,
+    ) -> Result<(String, Option<String>, Params), RunError> {
         self.validate(&call)?;
         let id = match &call.session {
             Some(id) => id.clone(),
@@ -87,6 +92,7 @@ impl Server {
         // The backend resumes with its own token; our session id is never handed
         // to it. A fresh session has no token, so it starts clean.
         params.session = resume;
+        params.structured = structured;
         Ok((id, agent, params))
     }
 
@@ -103,7 +109,15 @@ impl Server {
     /// atom; the MCP `prompt` tool is a thin wrapper over it. A fresh call mints
     /// a session and returns its id; passing that id back continues the thread.
     pub async fn run(&self, call: Call) -> Result<Outcome, RunError> {
-        let (id, agent, params) = self.prepare(call)?;
+        let (id, agent, params) = self.prepare(call, false)?;
+        let outcome = self.backend.run(&params).await?;
+        Ok(self.finish(id, agent, outcome))
+    }
+
+    /// Like [`Server::run`], but asking the backend for a structured result so
+    /// the agent can emit `posts`. Used by the bus for a fired turn.
+    pub(crate) async fn run_structured(&self, call: Call) -> Result<Outcome, RunError> {
+        let (id, agent, params) = self.prepare(call, true)?;
         let outcome = self.backend.run(&params).await?;
         Ok(self.finish(id, agent, outcome))
     }
@@ -116,7 +130,7 @@ impl Server {
         call: Call,
         events: UnboundedSender<Event>,
     ) -> Result<Outcome, RunError> {
-        let (id, agent, params) = self.prepare(call)?;
+        let (id, agent, params) = self.prepare(call, false)?;
         let outcome = self.backend.run_streaming(&params, events).await?;
         Ok(self.finish(id, agent, outcome))
     }
@@ -178,15 +192,19 @@ pub fn router(server: Server) -> McpRouter {
 struct BroadcastInput {
     channel: String,
     body: String,
+    /// Address one agent directly, so it reacts even if not subscribed.
+    #[serde(default)]
+    to: Option<String>,
 }
 
 fn broadcast_tool(server: Server) -> Tool {
     ToolBuilder::new("broadcast")
-        .description("Post a message to a channel; subscribed agents react")
+        .description("Post a message to a channel; subscribed agents react, plus a directed `to`")
         .extractor_handler(
             server,
             |State(server): State<Server>, Json(input): Json<BroadcastInput>| async move {
-                let msg = server.broadcast(&input.channel, "operator", &input.body);
+                let msg =
+                    server.broadcast(&input.channel, "operator", input.to.as_deref(), &input.body);
                 CallToolResult::from_serialize(&msg)
             },
         )

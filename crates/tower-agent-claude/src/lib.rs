@@ -21,7 +21,7 @@ use claude_wrapper::streaming::{BlockDelta, PartialMessageEvent, StreamEvent, st
 use claude_wrapper::types::{OutputFormat, QueryResult};
 use claude_wrapper::{Claude, Effort, QueryCommand};
 use tokio::sync::mpsc::UnboundedSender;
-use tower_agent::{Backend, BackendError, Event, Outcome, Params};
+use tower_agent::{Backend, BackendError, Event, Outcome, Params, Post};
 
 /// A backend that runs prompts through the Claude Code CLI via `claude-wrapper`.
 pub struct ClaudeBackend {
@@ -104,16 +104,63 @@ pub fn build_query(params: &Params) -> QueryCommand {
     cmd
 }
 
+/// The report schema, hand-written with no `$schema` key (the CLI rejects the
+/// draft URL that schemars emits).
+fn report_schema() -> String {
+    r#"{"type":"object","properties":{"summary":{"type":"string"},"reply":{"type":"string"},"posts":{"type":"array","items":{"type":"object","properties":{"channel":{"type":"string"},"body":{"type":"string"},"to":{"type":"string"},"reply_to":{"type":"integer"}},"required":["channel","body"]}}},"required":["summary"]}"#.to_string()
+}
+
+/// Instructions appended to the system prompt for a structured turn, explaining
+/// the report the schema enforces.
+const REPORT_CONTRACT: &str = "When you finish, return a JSON object matching the schema. `summary` \
+    is one line for the operator's log. `reply` is your actual answer to whoever invoked you (the \
+    work product, not a log line). `posts` are messages to other agents: each has a `channel`, a \
+    `body`, and optionally `to` (address one agent directly, so it reaches them even if they do \
+    not subscribe to the channel) and `reply_to` (the id of the message you are answering, to \
+    thread it). Post when another agent should react; otherwise leave posts empty.";
+
+/// Parse a structured report into an outcome, falling back to a plain reply if
+/// the model did not return the expected JSON.
+fn parse_report(json: &str, session: Option<String>) -> Outcome {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        summary: String,
+        #[serde(default)]
+        reply: String,
+        #[serde(default)]
+        posts: Vec<Post>,
+    }
+    match serde_json::from_str::<Raw>(json) {
+        Ok(raw) => Outcome {
+            summary: raw.summary,
+            reply: raw.reply,
+            posts: raw.posts,
+            session,
+        },
+        Err(_) => Outcome::from_reply(json, session),
+    }
+}
+
 #[async_trait]
 impl Backend for ClaudeBackend {
     async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
         let claude = self.build_claude(params)?;
-        match build_query(params).execute_json(&claude).await {
+        let mut cmd = build_query(params);
+        if params.structured {
+            cmd = cmd
+                .json_schema(report_schema())
+                .append_system_prompt(REPORT_CONTRACT);
+        }
+        match cmd.execute_json(&claude).await {
             Ok(qr) if qr.is_error => Err(BackendError::new(qr.result)),
-            Ok(qr) => Ok(Outcome::from_reply(
-                qr.result,
-                (!qr.session_id.is_empty()).then_some(qr.session_id),
-            )),
+            Ok(qr) => {
+                let session = (!qr.session_id.is_empty()).then_some(qr.session_id);
+                Ok(if params.structured {
+                    parse_report(&qr.result, session)
+                } else {
+                    Outcome::from_reply(qr.result, session)
+                })
+            }
             Err(e) => Err(BackendError::new(format!("run failed: {e}"))),
         }
     }

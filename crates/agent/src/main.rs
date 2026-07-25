@@ -78,6 +78,9 @@ enum Cmd {
         channel: String,
         /// The message body.
         body: String,
+        /// Address one agent directly, so it reacts even if not subscribed.
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Serve the agent server over stdio (MCP); runs the scheduler and bus too.
     Serve,
@@ -162,9 +165,9 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("tick: {e}"))?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
         }
-        Cmd::Broadcast { channel, body } => {
+        Cmd::Broadcast { channel, body, to } => {
             let bus = server.spawn_bus();
-            server.broadcast(&channel, "operator", &body);
+            server.broadcast(&channel, "operator", to.as_deref(), &body);
             server.wait_idle().await;
             bus.abort();
             for m in server.feed(None, 50) {

@@ -180,6 +180,9 @@ impl Config {
             config_dir: agent
                 .and_then(|a| a.config_dir.clone())
                 .or_else(|| self.defaults.config_dir.clone()),
+            // The bus sets this on a fired turn (see Server::prepare); a resolved
+            // call is unstructured by default.
+            structured: false,
         }
     }
 }
