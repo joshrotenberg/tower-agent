@@ -10,6 +10,7 @@ description = "An agent server exposed as an MCP surface: a prompt tool over a b
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 croner.workspace = true
 schemars.workspace = true
 serde.workspace = true
