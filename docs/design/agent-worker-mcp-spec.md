@@ -202,6 +202,26 @@ worker, and the internal bus for a worker's own agents.
 - MCP 2026-07-28 specification release candidate (elicitation, MCP Apps): [blog](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/)
 - A2A and the agent-protocol landscape: [MCP vs A2A](https://auth0.com/blog/mcp-vs-a2a/)
 
+## Conformance language
+
+The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
+RECOMMENDED, MAY, and OPTIONAL in this document are to be interpreted as
+described in RFC 2119 and RFC 8174 when, and only when, they appear in all
+capitals.
+
+Normative requirements are tagged with a stable identifier of the form
+`[AW-<AREA>-<n>]` (for example `[AW-PROMPT-1]`). An identifier, once assigned, is
+never reused for a different requirement, so an implementation can cite
+conformance point by point and the conformance ladder can reference requirements
+directly. A requirement's tier (Core, or a named module) is given by the section
+that owns it.
+
+This document specifies a contract, not an implementation. A conforming server
+satisfies every MUST in the tiers it advertises (see Conformance, tiers and
+extensibility). Where a requirement constrains observable behaviour, an
+implementation is bound by it; where the text describes an internal mechanism, an
+implementation MAY choose any mechanism that preserves the observable contract.
+
 ## Core model and vocabulary
 
 This section fixes the nouns and the enums. It is the **single source of truth** for the concept set: every later section is defined in terms of these terms and MUST cite the enumerations published here **verbatim**. An implementation MUST NOT rename a concept, MUST NOT introduce a second concept that occupies the same role, and MUST NOT invent an enum value not registered here. Where a term maps onto an MCP primitive, that mapping is normative and is stated in the term's entry. Where the deep semantics of a term live in another section, this section gives the canonical name and shape and **defers** the mechanism to that owning section rather than restating it.
@@ -2498,6 +2518,96 @@ Each row is a single, testable assertion drawing only on the canonical Vocabular
 | C31 | any | Both advertisement layers present and agreeing (MCP-native `capabilities` + `agentWorker`) | Read `initialize`; confirm `tasks` presence matches `async.tasks`, `enums` set |
 | C32 | any | A call using an unadvertised module/param is rejected, not partially run | Call an absent module; expect an error, not a partial run |
 
+
+## Surface parity with a managed-agents REST API
+
+The strongest check that this surface is complete, and the clearest way to see
+what it is still missing, is to hold it against a proven, generally-available
+REST API for the same job. The Claude API, together with Claude Managed Agents,
+is exactly that: a production surface for running models and long-lived agents.
+Its nouns are, strikingly, this spec's nouns. An Agent Worker MCP Server SHOULD
+be understood as the MCP-native analog of that surface: the same capabilities,
+projected onto MCP primitives instead of HTTP resources.
+
+### The shapes already agree
+
+| Managed-agents REST surface | This spec |
+|---|---|
+| Messages (`POST /v1/messages`) | the `prompt` atom (one tool) |
+| Streaming response events | progress-channel streaming |
+| Message Batches (`/v1/messages/batches`) | bulk invocation (see below) |
+| Token counting (`/v1/messages/count_tokens`) | pre-flight estimation (see below) |
+| Models (`GET /v1/models`) | model discovery in the capability descriptor |
+| Files (`/v1/files`) | inbound blobs, paired with the artifact model |
+| Agents (`/v1/agents`, versioned) | agents (named config profiles) |
+| Sessions (`/v1/sessions`, `GET .../stream`) | sessions (resumable threads) plus a live run resource |
+| Environments (`/v1/environments`) | per-agent environments and isolation |
+| Admin (orgs, workspaces, keys, members, RBAC) | identity, authentication, and tenancy |
+| `request-id`, organization id headers | correlation and tenant identity on every run |
+
+That a production platform arrived independently at Agents, Sessions, and
+Environments as the core nouns is evidence the model is right, not incidental.
+
+### What the parity requires
+
+Holding the two side by side surfaces capabilities a full-featured worker needs
+that the sections above under-specify. Each is stated as a normative requirement
+so the conformance ladder can pick it up.
+
+- [AW-BATCH-1] A server SHOULD offer bulk invocation: submitting many prompt
+  calls as one unit and collecting their results, mirroring a message-batches
+  endpoint. A batch MUST be expressed as a task (the batch and each item
+  observable), MUST NOT block, and SHOULD be priced or rate-classed distinctly
+  from interactive runs.
+- [AW-COST-1] A server SHOULD offer pre-flight estimation: a way to estimate the
+  token and monetary cost of a prompt before running it (a count-tokens analog),
+  so a client can route, truncate, or refuse within a budget rail.
+- [AW-VER-1] Agent configurations SHOULD be versioned: an agent has an
+  addressable, immutable version; a run records the exact agent version it used;
+  a config change mints a new version rather than mutating history.
+- [AW-FILE-1] A server MAY accept inbound files: uploading a blob once and
+  referencing it across prompt calls, the read counterpart to the outbound
+  artifact model. Inbound and outbound blobs SHOULD share one addressing scheme,
+  lifecycle, and access-control model.
+- [AW-USAGE-1] A server SHOULD expose aggregate usage and cost, not only per-run
+  cost: totals over a window, broken down by agent, session, tenant, and cache
+  class (uncached input, cached input, cache creation, output), so spend is
+  reconcilable against a backend's own billing.
+- [AW-RATE-1] A server SHOULD enforce rate limits (requests and tokens per unit
+  time), distinct from the spend cap: the budget bounds total cost, the rate
+  limit bounds burst. Both MUST surface as typed, retryable failures carrying a
+  retry hint.
+- [AW-PAGE-1] Every resource collection (runs, sessions, channels, agents, gates)
+  MUST be paginated with a stable, opaque cursor and a page limit, and MUST
+  tolerate concurrent mutation: a cursor stays valid as items are added.
+- [AW-MODEL-1] The capability descriptor MUST enumerate the models each backend
+  exposes, so a client can choose a model by name and know it resolves, rather
+  than discovering an unsupported model as a run-time failure.
+
+### Cross-cutting conventions to mirror
+
+- Correlation: every run and message MUST carry a stable id a client can quote in
+  a report; a server SHOULD echo a caller-supplied idempotency or correlation key.
+- Versioning: the wire contract MUST be versioned and negotiated (through MCP
+  capability negotiation), so a client learns the surface version before it
+  depends on a field.
+- Request limits: a server MUST bound request and payload size and reject an
+  oversize request with a typed error, and SHOULD allow larger limits for batch
+  and file ingress than for interactive prompts.
+- Auth and tenancy: a server MUST authenticate clients and MAY scope agents,
+  sessions, runs, budgets, and channels to a tenant or workspace, with per-tenant
+  keys and roles.
+
+### Deliberate divergences
+
+An MCP worker is not a REST clone, and SHOULD diverge where MCP fits better:
+
+- Observable state is a subscribable resource, not a polled GET: a client watches
+  `run://<id>` live rather than polling, which a REST surface cannot do natively.
+- Long work is an MCP task with input-required holds, so approval and mid-run
+  questions ride the protocol rather than a callback URL.
+- There is no second control plane: administration is tools and resources on the
+  same endpoint, not a separate API host.
 
 ## Appendix A: Canonical vocabulary registry
 
