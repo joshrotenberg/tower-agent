@@ -34,6 +34,13 @@ This specification defines a general, language- and backend-agnostic contract fo
 10. The MCP surface and client integration (revised)
 11. Durability, deployment and scale
 12. Conformance, tiers and extensibility
+13. Surface parity with a managed-agents REST API
+- Appendix A: Canonical vocabulary registry
+- Appendix B: Error model and taxonomy
+- Appendix C: Artifact and large-output reference model
+- Appendix D: Identity, authentication and multi-tenancy
+- Appendix E: Normative requirements index (every `[AW-*]` obligation, tagged and tiered)
+- Appendix F: Conformance profiles (the required and recommended requirements per tier)
 
 ## Thesis and scope
 
@@ -214,7 +221,10 @@ Normative requirements are tagged with a stable identifier of the form
 never reused for a different requirement, so an implementation can cite
 conformance point by point and the conformance ladder can reference requirements
 directly. A requirement's tier (Core, or a named module) is given by the section
-that owns it.
+that owns it. Appendix E is the consolidated index of every tagged requirement,
+grouped by tier; Appendix F states, per tier, which requirements a server MUST
+and SHOULD satisfy to advertise that tier. The prose sections remain the
+authority on intent; the appendices are the machine-checkable projection of it.
 
 This document specifies a contract, not an implementation. A conforming server
 satisfies every MUST in the tiers it advertises (see Conformance, tiers and
@@ -2734,6 +2744,342 @@ Identity is a negotiable, tiered, self-testable capability, not deployment folkl
 **Tenancy.** A `tenant` is the isolation boundary. Agents, sessions, runs, channels, and artifacts are scoped to a tenant, and no reference (session id, run id, artifact URI, channel name) resolves across tenants. The descriptor advertises `tenancy` as one of `single` (one implicit tenant), `scoped` (multiple tenants, shared process), or `isolated` (per-tenant isolated execution environments).
 
 **Descriptor and tiering.** The `agentWorker` capability descriptor MUST include an `identity` block: `{ auth_schemes, tenancy, segregation_of_duty }`. The conformance ladder MUST add an identity dimension: a base tier MAY run single-principal with no authentication; a hosted tier MUST require authenticated principals, tenant-scoped resource resolution, and (where advertised) segregation of duty on approval gates. The conformance checklist MUST include assertions that cross-tenant reference resolution is refused and that an unauthenticated request is rejected.
+
+## Appendix E: Normative requirements index
+
+Every normative obligation in this specification, tagged and tiered. RFC 2119/8174 keyword semantics apply (see Conformance language). Ids are stable and never reused.
+
+### Core
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-PROMPT-1 | MUST | The server MUST project a single prompt operation onto exactly one MCP tool whose only required input is the prompt string. |
+| AW-PROMPT-2 | MUST | The prompt tool MUST accept the backend parameters (including model, effort, tools, working directory, session, and timeout) as optional inputs alongside the required prompt. |
+| AW-PROMPT-3 | MUST | When an optional parameter is omitted from a call, the server MUST resolve its value from configuration, applying the invoked agent profile's default before the server-level default. |
+| AW-PROMPT-4 | MUST | A supplied parameter that the negotiated backend does not support MUST cause a typed failure and MUST NOT be silently dropped or coerced to a different value. |
+| AW-PROMPT-5 | MUST | The prompt tool MUST support synchronous execution that returns the completed result inline in the tools/call response. |
+| AW-PROMPT-6 | MUST | The prompt tool MUST support task-augmented execution per MCP Tasks (SEP-2663), returning a task handle that the client retrieves via tasks/get. |
+| AW-PROMPT-7 | MUST | A task backing a prompt operation MUST report its status using exactly one of the values working, input_required, completed, failed, or cancelled. |
+| AW-PROMPT-8 | MUST | The server MUST honor tasks/cancel on an in-flight prompt task by stopping the underlying agent turn and transitioning the task to the cancelled status. |
+| AW-PROMPT-9 | MUST | Token and progress streaming MUST be opt-in per call, defaulting to off, and MUST be delivered over the MCP progress notification channel rather than the result payload. |
+| AW-PROMPT-11 | MUST | A completed prompt operation MUST return a result that carries the agent's output together with terminal run metadata including the run id, final status, and token usage. |
+| AW-PROMPT-12 | MUST | The server MUST enforce the effective timeout by terminating the turn when it is exceeded and yielding a typed timeout failure (a synchronous error or a task in the failed status). |
+| AW-PROMPT-13 | SHOULD | The prompt tool SHOULD accept a caller-supplied idempotency key such that a retried call bearing the same key returns the original run's result instead of executing the prompt again. |
+| AW-PROMPT-14 | MUST | Structured output (a JSON-schema-constrained result) and token streaming MUST be mutually exclusive modes, and a call requesting both MUST be rejected with a typed failure. |
+| AW-PROMPT-15 | MUST | When a call requests structured output, the returned result MUST conform to the supplied JSON schema, and a result that cannot be made to conform MUST be reported as a typed failure rather than returned as free text. |
+| AW-AGENT-1 | MUST | An agent MUST be defined as a named configuration profile consisting of default parameters and a base prompt, and MUST NOT require or contain executable code. |
+| AW-AGENT-2 | MUST | Each agent MUST be identified by a stable, unique name by which an invocation selects it. |
+| AW-AGENT-3 | MUST | On every invocation the prompt parameter MUST be required, and all backend parameters (such as model, effort, tools, working directory, session, and timeout) MUST be optional. |
+| AW-AGENT-4 | MUST | The server MUST resolve each optional parameter by precedence such that an explicit per-invocation value overrides the agent profile default, which in turn overrides the deployment-wide default. |
+| AW-AGENT-5 | MUST | When no per-invocation, agent-profile, or deployment value is supplied for an optional parameter, the server MUST fall through to the resolved backend's own default and MUST NOT synthesize a value of its own. |
+| AW-AGENT-6 | MUST | The agent profile's base prompt MUST be applied to every invocation of that agent in addition to the per-invocation prompt. |
+| AW-AGENT-7 | MUST | Backends MUST be integrated through a single uniform seam, and the core MUST NOT name, hardcode, or assume any specific backend. |
+| AW-AGENT-8 | MUST | Each backend MUST declare the set of parameters and capabilities it supports, and the server MUST expose this negotiated capability set on a discoverable surface (a resource or tool). |
+| AW-AGENT-9 | MUST | When an invocation explicitly specifies a parameter that the resolved backend does not support, the server MUST reject the invocation with a typed error and MUST NOT silently drop or coerce the parameter. |
+| AW-AGENT-10 | MUST | Each agent profile MUST resolve to exactly one backend and MUST be tagged with that backend identity. |
+| AW-AGENT-12 | SHOULD | The server SHOULD validate an agent profile's default parameters against its bound backend's declared capabilities at configuration load time and reject a profile whose defaults are unsupported, rather than deferring the failure to invocation time. |
+| AW-SURFACE-1 | MUST | Each agent's single prompt operation MUST be projected onto exactly one MCP tool, so that invoking that agent is a call to that tool. |
+| AW-SURFACE-2 | MUST | The server's observable state MUST be exposed as MCP resources rather than as tools that a client must repeatedly poll. |
+| AW-SURFACE-3 | MUST | State-bearing MCP resources MUST be subscribable and MUST push updates to subscribers when the underlying state changes, so that clients observe state through subscription notifications instead of polling. |
+| AW-SURFACE-5 | MUST | Reusable invocation templates MUST be exposed as MCP prompts on the same surface as the tools and resources. |
+| AW-SURFACE-6 | MUST NOT | The server MUST NOT expose any control, administration, or introspection capability through a channel other than its MCP surface, so that there is a single control plane and no second admin host. |
+| AW-SURFACE-7 | MUST | The server MUST advertise its supported capabilities (which tools, resources, prompts, and task features it offers) during MCP initialization so that a client can discover the surface before use. |
+| AW-SURFACE-8 | MUST | Which backend parameters a given agent/tool accepts MUST be discoverable and reported through the MCP surface, so that a client can determine supported parameters via negotiation rather than by trial invocation. |
+| AW-SURFACE-9 | MUST | An invocation MUST be executable as a task-augmented tools/call conforming to SEP-2663, and the server MUST implement its task lifecycle methods tasks/get, tasks/update, and tasks/cancel together with notifications/tasks. |
+| AW-SURFACE-10 | MUST | A task's status MUST be reported using only the SEP-2663 status values working, input_required, completed, failed, and cancelled. |
+| AW-SURFACE-11 | MUST | Token or progress streaming MUST be opt-in and MUST be delivered over the task's MCP progress channel, kept distinct from the tool's final structured result rather than merged into it. |
+| AW-SURFACE-12 | MUST | The server MUST support multiple MCP clients connected concurrently, all operating against the same server state (runs, sessions, tasks, and resources). |
+| AW-SURFACE-13 | MUST NOT | A running task MUST NOT be cancelled or lost solely because the client that initiated it disconnects, so that work continues detached from its originating client. |
+| AW-SURFACE-14 | MUST | A client that did not initiate a task MUST be able to attach to it by its task id to observe its progress and to update or cancel it. |
+| AW-DEPLOY-3 | MUST | A task-augmented operation's state MUST be persisted independently of the client connection that created it, so that after a disconnect and reconnect a client can still retrieve it via tasks/get. |
+| AW-DEPLOY-4 | MUST NOT | The server MUST NOT cancel a running task solely because the client connection that initiated it has dropped. |
+| AW-ERR-1 | MUST | Every operation failure MUST be reported as a typed error object carrying a stable, machine-readable error code drawn from a defined taxonomy. |
+| AW-ERR-2 | MUST | The error taxonomy MUST define a distinct code for each of at least the validation, unsupported-parameter, backend-upstream, timeout, cancellation, budget-exceeded, rate-limited, session-resume, permission-denied, and internal failure categories, including a catch-all internal code for failures that fit no other category. |
+| AW-ERR-3 | MUST | Every typed error MUST declare whether it is retryable or terminal. |
+| AW-ERR-4 | MUST NOT | The server MUST NOT automatically retry an operation that failed with a terminal error. |
+| AW-ERR-5 | SHOULD | A retryable error SHOULD carry a retry hint indicating the minimum delay the client should wait before retrying. |
+| AW-ERR-7 | MUST | Every typed error MUST carry a human-readable message that is distinct from its machine-readable error code. |
+| AW-ERR-8 | MUST NOT | An unsupported, unknown, or malformed request parameter MUST NOT be silently dropped, defaulted, or coerced, and MUST instead be reported as a typed error. |
+| AW-ERR-9 | MUST | An unsupported-parameter error MUST name the specific parameter or parameters that the backend did not support. |
+| AW-ERR-10 | MUST | A failure delivered through the task channel MUST set the task status to failed and attach the typed error object rather than a bare string message. |
+| AW-ERR-11 | MUST | A synchronous tools/call failure MUST return the same typed error structure, including code, retryable classification, and correlation id, as the equivalent task-augmented failure. |
+| AW-ERR-12 | MUST | A cancelled operation MUST surface a cancellation outcome that is distinguishable from a failure outcome. |
+| AW-ART-1 | MUST | Any output payload whose size exceeds the server's configured inline threshold MUST be stored out of line as an artifact and referenced by an artifact URI rather than embedded inline in the response. |
+| AW-ART-2 | MUST NOT | No record the server persists or returns (run record, session record, bus post, feed entry, or ledger row) MUST NOT carry an inline binary or large payload; it carries an artifact URI reference in its place. |
+| AW-ART-3 | MUST | The server MUST expose a single uniform artifact URI scheme that identifies every stored blob independent of its origin, producer, or content type. |
+| AW-ART-4 | MUST | Inbound blobs supplied as prompt inputs and outbound blobs produced by runs MUST use the same artifact URI scheme and the same storage facility. |
+| AW-ART-5 | MUST | Creating an artifact MUST return its artifact URI, and that URI MUST resolve to the artifact's bytes through an MCP resource read. |
+| AW-ART-6 | MUST | Every artifact MUST record metadata comprising at least its media type, byte size, creation timestamp, and the run or agent that produced it. |
+| AW-ART-7 | MUST | An artifact's content MUST be immutable once created, so a given artifact URI always resolves to the same bytes. |
+| AW-ART-11 | MUST | A read of an artifact URI that has expired, been reclaimed, or been deleted MUST return a typed not-found error rather than empty, stale, or partial content. |
+| AW-ART-13 | SHOULD | An artifact SHOULD carry a content digest that enables clients to verify integrity and that the server MAY use to deduplicate identical blobs under distinct URIs. |
+| AW-IDENT-3 | MUST | The server MUST resolve each authenticated request to exactly one tenant (workspace) and exactly one principal identity within that tenant. |
+| AW-CONF-1 | MUST | A conformant server MUST implement the Core tier, defined as the single prompt tool with synchronous task-augmented-tools/call execution, and every server regardless of other tiers MUST satisfy Core in full. |
+| AW-CONF-2 | MUST | The capability tiers MUST form a ladder rooted at Core such that every optional tier (Sessions, Bus, Scheduling, Observability, Governance, Deployment) declares Core as a prerequisite and cannot be claimed without it. |
+| AW-CONF-3 | MUST NOT | A server MUST NOT advertise a capability tier unless it satisfies every normative requirement of that tier, so that no partial-tier conformance is representable on the wire. |
+| AW-CONF-4 | MUST | A server that declares a given tier MUST also satisfy every tier that tier transitively depends on, so that a declared higher tier subsumes all of its lower tiers. |
+| AW-CONF-5 | MUST | A server MUST report the exact set of capability tiers it implements during MCP capability negotiation at initialization. |
+| AW-CONF-6 | MUST | A server MUST advertise, during initialization, the wire-protocol specification version it implements as an explicit version identifier. |
+| AW-CONF-7 | MUST | Wire-protocol version identifiers MUST follow semantic-versioning rules in which backward-compatible additions increment the minor component and backward-incompatible changes increment the major component. |
+| AW-CONF-8 | MUST | When a client and server share no mutually compatible wire-protocol version, the server MUST refuse the session with a typed version-mismatch error rather than proceeding under an assumed version. |
+| AW-CONF-13 | MUST NOT | The server MUST NOT provide workflow or DAG orchestration primitives such as dependency graphs, joins, or fan-out coordination, leaving deterministic composition to clients that call the prompt tool repeatedly. |
+| AW-CONF-14 | MUST NOT | The server MUST NOT itself perform model inference or act as a model provider, and MUST delegate all generation to a negotiated, swappable backend that the core names none of. |
+| AW-VER-1 | SHOULD | Agent configurations SHOULD be versioned: an agent has an addressable immutable version, a run records the version it used, and a change mints a new version. |
+| AW-FILE-1 | MAY | A server MAY accept inbound files uploaded once and referenced across prompt calls, sharing one addressing/lifecycle/access-control scheme with outbound artifacts. |
+| AW-PAGE-1 | MUST | Every resource collection MUST be paginated with a stable opaque cursor and a page limit, and MUST tolerate concurrent mutation. |
+| AW-MODEL-1 | MUST | The capability descriptor MUST enumerate the models each backend exposes so a client can select a model by name and know it resolves. |
+| AW-GAP-1 | MUST | When a run needs information from the client that is not a world-write approval, the server MUST suspend the invocation's task into the input_required status carrying an MCP elicitation that describes the requested input, and MUST resume the run with the value supplied through tasks/update. |
+| AW-GAP-2 | MUST | A non-gate input_required elicitation that is not answered within its configured timeout MUST resolve the run to a typed timeout failure rather than remaining suspended indefinitely. |
+| AW-GAP-12 | MUST | The server MUST expose a discoverable listing of the configured agents whose entries carry at least each agent's name, backend tag, and accepted parameter set, so a client can select an agent without trial invocation. |
+
+### Sessions
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-SESSION-1 | MUST | The prompt tool MUST accept an optional session parameter whose presence continues the identified session's thread and whose absence runs a session-less turn with no cross-turn continuity. |
+| AW-SESSION-2 | MUST | When an invocation requests a new session, the server MUST mint and return an opaque server-generated session id that the client uses for all subsequent resume, fork, list, and delete operations. |
+| AW-SESSION-4 | MUST | The server MUST tag every session with the backend that created it and record that tag as part of the session's durable state. |
+| AW-SESSION-5 | MUST | The server MUST refuse an attempt to resume a session against a backend other than the one that created it, returning a typed cross-backend error rather than re-binding or silently switching the session. |
+| AW-SESSION-6 | MUST | Resuming a session MUST restore the prior thread's accumulated conversation context so the resumed turn continues from that history rather than starting fresh. |
+| AW-SESSION-7 | MUST | The server MUST allow a turn held as an input_required task to resume into the same session that produced it, so that an approved gated continuation threads the very session that proposed the action. |
+| AW-SESSION-8 | MUST | Each completed turn on a session MUST be appended to that session's thread so that a later resume observes the outputs of all prior turns on the session. |
+| AW-SESSION-9 | MUST | The server MUST support forking a session into a new independent session that copies the source session's context up to the fork point while leaving the source session unmodified. |
+| AW-SESSION-10 | MUST | A forked session MUST receive its own newly minted server-generated id and its own backend tag, and MUST be independently resumable, forkable, and expirable from the source session. |
+| AW-SESSION-11 | MUST | The server MUST allow at most one in-flight turn per session and MUST reject an invocation targeting a session that already has a turn in flight with a typed session-busy error rather than interleaving turns. |
+| AW-SESSION-12 | MUST | The server MUST expose sessions as an enumerable listing whose entries carry at least the session id, backend tag, agent, creation time, last-activity time, and status, enabling a client to re-enter a session by id after disconnect. |
+| AW-SESSION-13 | MUST | The server MUST provide a way for a client to explicitly delete a session, after which the server MUST refuse any resume or fork of that session id with a typed error. |
+| AW-SESSION-14 | MUST | The server MUST apply a retention policy that can expire a session, and MUST refuse to resume or fork an expired session with a typed error distinct from the unknown-session error. |
+| AW-DEPLOY-1 | MUST | The server MUST persist each session's state (server-minted id, backend tag, and the hidden backend-token mapping) to durable storage so that the session remains resumable after a server restart. |
+
+### Bus
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-BUS-1 | MUST | A channel MUST be identified solely by a topic name string, requiring no prior declaration or typed schema, and MUST come into existence upon the first publish to that name. |
+| AW-BUS-2 | MAY | An agent configuration MAY declare a set of subscribed channels, and each such subscription MUST act as a trigger source for that agent. |
+| AW-BUS-3 | MUST | Publishing a message onto a channel MUST fire an invocation of every agent currently subscribed to that channel. |
+| AW-BUS-4 | MUST | An invocation fired by a channel message MUST execute as a structured turn whose structured result enumerates zero or more posts to be emitted. |
+| AW-BUS-5 | MUST | The server MUST deliver each emitted post to every subscriber of that post's channel. |
+| AW-BUS-6 | MUST | When a post names a directed addressee, the server MUST deliver that post to the addressee in addition to the channel's subscribers, even if the addressee is not subscribed to the channel. |
+| AW-BUS-7 | MUST | When a post carries a reply-to reference to a prior post, the server MUST use that reference to thread the post into the referenced conversation. |
+| AW-BUS-8 | MUST NOT | A post MUST NOT embed a large payload and MUST instead carry a reference (issue, PR, artifact path, or run id) pointing at the underlying data. |
+| AW-BUS-9 | MUST | The turn context supplied to a fired subscriber MUST be the recent thread of the triggering conversation rather than the channel's complete message history. |
+| AW-BUS-11 | MUST NOT | The server MUST NOT require a synchronous join or barrier to converge a multi-agent exchange, leaving convergence to be achieved by prompting an agent to summarize or decide. |
+| AW-BUS-12 | MUST NOT | The server MUST NOT expose a synchronous, blocking agent-to-agent call, so that all inter-agent coordination is asynchronous publish-then-fire. |
+| AW-BUS-13 | MUST | The server MUST provide at-least-once, restart-durable post delivery by persisting every message as a durable record read through a per-subscriber cursor, and idempotency MUST remain the subscriber's responsibility. |
+| AW-BUS-14 | MUST | A subscriber MUST observe the messages of any single channel in the order they were published to that channel. |
+| AW-DEPLOY-8 | MUST | Channel subscriptions that bind an agent to a channel MUST persist across restarts so that a durable subscriber continues to fire after a restart. |
+| AW-IDENT-11 | MUST NOT | A channel post MUST NOT be delivered to, nor a subscription observe, any traffic originating from a tenant other than the subscriber's own. |
+| AW-GAP-5 | MUST | The server MUST expose an operation by which an authorized client publishes a message onto a named channel, producing the same fire-subscribers behavior as a post emitted by an agent turn. |
+| AW-GAP-6 | MUST | The server MUST expose an enumerable listing of active channels and of each agent's channel subscriptions through the MCP surface. |
+| AW-GAP-7 | SHOULD | The server SHOULD allow an agent's channel subscriptions to be added or removed at runtime without redeploying the agent's configuration. |
+| AW-GAP-8 | MUST | A fired subscriber turn that fails up to a configured redelivery bound MUST advance the per-subscriber cursor past the offending message and record it to a dead-letter rather than blocking that subscriber's channel indefinitely. |
+
+### Scheduling
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-SCHED-1 | MUST | Every trigger, whether a direct tool invocation, a schedule tick, or a bus subscription firing, MUST produce exactly one run under the unified trigger model. |
+| AW-SCHED-3 | MUST | A schedule tick MUST invoke the same prompt operation, with the same parameter set and defaults, as a direct invocation, so a tick is just another invoke. |
+| AW-SCHED-4 | MUST | A schedule MUST express its recurrence as a cron expression that the server evaluates to compute tick times. |
+| AW-SCHED-5 | MUST | Each schedule MUST carry an explicit timezone, and the server MUST evaluate the cron expression in that timezone rather than in server-local time or UTC. |
+| AW-SCHED-6 | MUST | When a computed tick time falls in a daylight-saving gap or repeated hour, the server MUST resolve the tick deterministically according to a documented rule rather than firing it an unspecified number of times. |
+| AW-SCHED-7 | MUST | A schedule MAY declare a run-on-start flag, and when it is set the server MUST fire one immediate run at schedule registration or server startup, independent of and prior to the next cron-computed tick. |
+| AW-SCHED-8 | MUST | A schedule MUST declare a missed-tick policy governing ticks whose scheduled time elapsed while the server was not running, and the server MUST apply that policy on restart. |
+| AW-SCHED-9 | MUST | The server MUST support at least the missed-tick policy values skip (fire no catch-up run), coalesce (fire a single catch-up run regardless of how many ticks were missed), and backfill (fire one run per missed tick). |
+| AW-SCHED-10 | MUST | A schedule MUST declare an overlap policy governing a tick that fires while a prior run of the same schedule is still in flight. |
+| AW-SCHED-11 | MUST | The server MUST support at least the overlap policy values skip (drop the new tick), queue (serialize the new tick behind the in-flight run), and allow (start the new run concurrently). |
+| AW-SCHED-12 | MUST | Under a queue overlap policy the server MUST coalesce multiple pending ticks so that at most one run is queued behind the in-flight run. |
+| AW-SCHED-13 | MUST | Overlap and missed-tick policies MUST be scoped to a single schedule's own ticks and MUST NOT serialize, skip, or coalesce runs across distinct schedules or against direct invocations. |
+| AW-DEPLOY-6 | MUST | Scheduled job definitions, including cron expression, timezone, run-on-start flag, and missed-tick policy, MUST persist across restarts so that schedules continue to fire after a restart. |
+| AW-IDENT-14 | MUST | A scheduled (cron) invocation MUST execute under its owning tenant's identity, role grants, and budget. |
+| AW-GAP-3 | MUST | The server MUST expose operations on its MCP surface to register, list, update, and delete schedules, and a deleted schedule MUST fire no further ticks. |
+| AW-GAP-4 | MUST | The server MUST allow a schedule to be disabled without deleting it, and a disabled schedule MUST fire no ticks until it is re-enabled. |
+
+### Observability
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-PROMPT-10 | MUST | Each streamed progress notification MUST carry a discriminated event kind drawn from a fixed taxonomy covering status/lifecycle transitions, output/token deltas, and tool-call activity. |
+| AW-AGENT-15 | SHOULD | The server SHOULD record and expose the effective resolved parameter set actually dispatched to the backend for each invocation. |
+| AW-SCHED-2 | MUST | The server MUST record each run's trigger kind (invoke, schedule, or subscription) so the origin of the run is distinguishable after the fact. |
+| AW-SCHED-14 | MUST | A tick that is skipped or coalesced by an overlap or missed-tick policy MUST be recorded as an observable event rather than dropped silently. |
+| AW-OBS-1 | MUST | Every agent invocation, regardless of trigger, MUST be recorded as a first-class run identified by a stable, unique, server-minted run id. |
+| AW-OBS-2 | MUST | A run record MUST include the invoking agent profile, the associated session id (if any), the trigger kind, the current status, submission and start and completion timestamps, and the accrued cost. |
+| AW-OBS-3 | MUST | A run record MUST identify its trigger kind from the defined provenance set (client tool call, scheduled tick, inter-agent bus message, or remote/programmatic call). |
+| AW-OBS-4 | MUST | The server MUST expose each run as a subscribable MCP resource addressed as run://<id> that pushes updates to subscribers on state change rather than requiring polling. |
+| AW-OBS-5 | MUST | The server MUST support live observation of an in-progress run by streaming its incremental progress and output to subscribers as that progress and output are produced. |
+| AW-OBS-6 | MUST | Run records MUST be enumerable through the MCP surface as a listing resource. |
+| AW-OBS-7 | MUST | Each run record MUST record the token usage and the monetary cost attributed to that individual invocation. |
+| AW-OBS-8 | MUST | A run that ends in failure MUST record a typed failure reason that distinguishes it from a completed or cancelled run. |
+| AW-OBS-9 | MUST | The server MUST maintain a feed that records inter-agent bus traffic (channel posts and directed messages) as an ordered, timestamped stream exposed as a subscribable MCP resource. |
+| AW-OBS-10 | MUST | Every run MUST carry a correlation (trace) id that groups causally related runs together. |
+| AW-OBS-11 | MUST | A run spawned by another run (a bus cascade turn or a downstream invoke from a scheduled tick) MUST record a reference to its originating parent run id. |
+| AW-OBS-13 | MUST | The server MUST expose a health resource that reports its liveness and readiness. |
+| AW-OBS-14 | SHOULD | The server SHOULD expose operational metrics such as active run count, queued run count, and failure rate as an observable resource. |
+| AW-OBS-15 | MUST | Run records and feed entries MUST be retained according to a configurable retention policy. |
+| AW-OBS-16 | MUST | A completed, failed, or cancelled run's record MUST remain retrievable for the configured retention window even after its underlying MCP task result has been reaped. |
+| AW-OBS-17 | MUST NOT | Retention pruning MUST NOT remove or truncate the record of an in-flight (non-terminal) run. |
+| AW-SURFACE-4 | MUST | Watching a long-running run live MUST be available by subscribing to that run's resource under a stable URI (e.g., run://<id>), and MUST NOT require polling a tool for its progress. |
+| AW-DEPLOY-2 | MUST | The server MUST durably persist every run record (id, agent, session, trigger kind, status, timings, and cost) so that the run ledger survives a server restart. |
+| AW-ERR-6 | MUST | Every typed error MUST carry a correlation id that identifies the run, and where applicable the task and session, that produced it. |
+| AW-ART-8 | MUST | A run record MUST reference the artifacts it produced by their URIs so a run's outputs are discoverable without inlining them into the record. |
+| AW-IDENT-10 | MUST | Every run, session, and channel-post record MUST carry the tenant and the principal identity under which it was created. |
+| AW-IDENT-13 | MUST NOT | Authentication credentials, keys, and backend secrets MUST NOT appear in run records, feeds, logs, resource payloads, or error responses. |
+| AW-CONF-9 | MUST | A server MUST expose its declared tiers, wire version, and supported extensions as a discoverable MCP resource so any client can introspect conformance without relying solely on the initialization handshake. |
+| AW-COST-1 | SHOULD | A server SHOULD offer pre-flight estimation of a prompt token and monetary cost before running it (a count-tokens analog). |
+| AW-USAGE-1 | SHOULD | A server SHOULD expose aggregate usage and cost over a window, broken down by agent, session, tenant, and cache class, reconcilable against a backend billing. |
+| AW-GAP-9 | MUST | A post suppressed because it reached the configured cascade depth bound MUST be recorded as an observable event rather than dropped silently. |
+| AW-GAP-10 | MUST | Each run record MUST reference the input prompt and the effective resolved parameter set actually dispatched to the backend so that the invocation is reproducible and auditable. |
+| AW-GAP-11 | MUST | A completed, failed, or cancelled run's final output MUST remain retrievable, inline or by artifact URI, for the configured retention window independent of the lifetime of its underlying MCP task result. |
+
+### Governance
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-AGENT-13 | MUST | An agent profile MUST be able to declare its execution environment (such as working directory and isolation root), and every invocation of that agent MUST run under the declared environment. |
+| AW-AGENT-14 | MUST NOT | An agent invocation MUST NOT inherit ambient host state (environment variables or global configuration) except what the agent profile explicitly opts into. |
+| AW-SESSION-3 | MUST NOT | The backend's native session or thread token MUST NOT appear inside the server-minted session id or in any session field exposed to a client through tools, resources, run records, or errors. |
+| AW-BUS-10 | MUST | The server MUST enforce a configurable cascade depth bound such that a post emitted at the depth bound MUST NOT fire any further subscriber invocations. |
+| AW-OBS-12 | MUST NOT | A run record or feed entry MUST NOT expose backend-secret material such as the hidden backend session token, credentials, or API keys. |
+| AW-GOV-1 | MUST | The server MUST classify each backend operation as either a world-write (mutating state outside the run's isolated workspace) or a contained operation, and MUST NOT execute a gated world-write until it has been approved. |
+| AW-GOV-2 | MUST | When a run reaches a gated world-write, the server MUST withhold execution and transition the invocation's task to the input_required status rather than executing it, blocking synchronously, or failing the run. |
+| AW-GOV-3 | MUST | The input_required task raised for a gated write MUST carry an MCP elicitation that identifies the requesting agent, the operation, and its target(s) in enough detail for an approver to decide. |
+| AW-GOV-4 | MUST | Upon approval delivered through tasks/update, the server MUST resume the suspended run and perform the previously withheld write exactly once. |
+| AW-GOV-5 | MUST | Upon denial of the gate elicitation, the server MUST NOT perform the withheld write and MUST report the denial to the run. |
+| AW-GOV-6 | MUST | A gate approval MUST authorize only the single pending write for which it was raised and MUST NOT implicitly authorize any subsequent write. |
+| AW-GOV-7 | MUST | The server MUST support a configurable auto-allow policy, scoped per agent and operation class, under which a matching world-write proceeds without raising an input_required suspension. |
+| AW-GOV-8 | MUST | An agent granted only read-capable tools MUST NOT trigger the gate, since it is incapable of performing a world-write. |
+| AW-GOV-9 | MUST | A gated write whose input_required elicitation is not answered within its configured timeout MUST resolve as a denial and leave the write unperformed. |
+| AW-GOV-10 | MUST | The server MUST enforce a per-agent cumulative spend budget and MUST refuse to start or continue any run whose accumulated cost would exceed the configured budget cap. |
+| AW-GOV-11 | MUST | The server MUST enforce a per-run turn cap that bounds the number of agent turns a single run may take, and MUST terminate a run that exceeds it. |
+| AW-GOV-12 | MUST | A run refused or terminated by a spend-budget or turn-cap limit MUST fail with a typed error that distinguishes which limit was breached. |
+| AW-GOV-13 | MUST | The server MUST contain a run's filesystem and resource access to a configured allowed root and MUST refuse any access that, after canonicalizing symlinks and relative segments, resolves outside that root. |
+| AW-GOV-14 | MUST | The server MUST isolate each run so that its filesystem, environment, and process state neither leak into nor are influenced by other concurrent runs. |
+| AW-GOV-15 | MUST | The server MUST seal each run from ambient host and user configuration by default (hermetic execution), incorporating such configuration only when it is explicitly granted into the run's context. |
+| AW-GOV-16 | MUST | The server MUST record every gate decision, including whether it was an approval or denial along with its source and timestamp, in the audit trail of the associated run. |
+| AW-GOV-17 | MUST | The server MUST record every world-write it performs in a durable audit trail bound to the originating run id. |
+| AW-GOV-18 | MUST NOT | Autonomous tuning or coordination performed by the server MUST NOT raise a budget, grant a tool capability, or approve a gated write. |
+| AW-DEPLOY-7 | MUST | The cumulative cost and spend counters that back budget caps MUST persist across restarts so that a restart does not reset accumulated spend measured against a budget. |
+| AW-ERR-13 | MUST NOT | An error message or detail MUST NOT expose the hidden backend session token or any backend credential. |
+| AW-ERR-14 | MUST | An error code MUST be a stable identifier that is not repurposed to mean a different failure across specification versions. |
+| AW-ART-9 | MUST | Read access to an artifact MUST be authorized against the same scope (owner, session, or agent) that governs the run that created it, and an unauthorized read MUST be refused as a typed error. |
+| AW-ART-10 | MUST | Each artifact MUST be subject to a retention policy, and the server MUST reclaim an artifact once its retention has elapsed. |
+| AW-ART-12 | MUST | The server MUST enforce a maximum artifact size, and an attempt to create an artifact exceeding it MUST fail with a typed error rather than truncating or silently splitting the content. |
+| AW-ART-14 | MAY | The server MAY support explicit deletion of an artifact, and such deletion MUST revoke its URI so subsequent reads return the typed not-found error. |
+| AW-IDENT-1 | MUST | The server MUST authenticate the connecting client before serving any tool call, resource read, prompt, or task operation. |
+| AW-IDENT-2 | MUST | A request that presents no credential or an invalid credential MUST be rejected with a typed authentication failure and MUST produce no side effect. |
+| AW-IDENT-4 | MUST | Every agent, session, run, schedule, budget, and channel MUST belong to exactly one tenant. |
+| AW-IDENT-5 | MUST NOT | A principal MUST NOT read, list, invoke, resume, or mutate any agent, session, run, schedule, budget, or channel belonging to a tenant other than its own. |
+| AW-IDENT-6 | MUST | A request that references a session, run, or agent identifier owned by another tenant MUST fail as not-found so that the identifier's existence is not disclosed. |
+| AW-IDENT-7 | MUST | The server MUST support per-key revocation such that a request bearing a revoked or expired key is rejected. |
+| AW-IDENT-8 | MUST | The server MUST distinguish an administrative role that may manage agents, configuration, keys, and budgets from a non-administrative role permitted only to invoke and read. |
+| AW-IDENT-9 | MUST | An operation whose required role the requesting principal does not hold MUST be refused with a typed authorization failure. |
+| AW-IDENT-12 | MUST | Budget and rate-limit caps MUST be enforced per tenant, and resource consumption by one tenant MUST NOT be counted against another tenant's cap. |
+| AW-IDENT-15 | MUST NOT | A run executed for one tenant MUST NOT read or write filesystem paths, working directories, or session state belonging to another tenant. |
+| AW-IDENT-16 | SHOULD | The server SHOULD resolve backend and provider credentials per tenant and SHOULD NOT share them implicitly across tenants. |
+| AW-RATE-1 | SHOULD | A server SHOULD enforce rate limits (requests and tokens per unit time) distinct from the spend cap, surfacing violations as typed retryable failures with a retry hint. |
+| AW-GAP-14 | SHOULD | The server SHOULD surface each configured backend's availability as an observable resource and SHOULD fail an invocation targeting an unavailable backend with a typed, retryable backend-unavailable error rather than blocking or hanging. |
+
+### Deployment
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-AGENT-11 | MUST | A single deployment MUST support multiple configured backends simultaneously, and different agents MAY be bound to different backends within that deployment. |
+| AW-SESSION-15 | SHOULD | The session retention or time-to-live threshold SHOULD be configurable rather than fixed, so a deployment can tune how long resumable sessions persist. |
+| AW-SURFACE-15 | MUST | Where the server offers more than one transport (e.g., stdio, unix socket, HTTP), the set and semantics of exposed tools, resources, prompts, and tasks MUST be identical across all transports. |
+| AW-DEPLOY-5 | MUST | On restart the server MUST reconcile any run or task left in a non-terminal (working) state at the prior shutdown to a defined terminal or resumed status, and MUST NOT leave it indefinitely dangling. |
+| AW-DEPLOY-9 | MUST | The same server core MUST support the full scale ladder (a single-user one-shot process, a hosted multi-client service, and a multi-instance fleet) selected by configuration rather than by a code fork. |
+| AW-DEPLOY-10 | MUST | The durable state store MUST be a swappable seam that permits an embedded single-file store for the one-shot deployment and a shared external store for the fleet deployment. |
+| AW-DEPLOY-11 | MUST | The server MUST be the sole owner and source of truth for run, session, task, and schedule state, and MUST NOT depend on the backend to persist any of that state beyond the hidden per-session backend token. |
+| AW-DEPLOY-12 | MUST | When a shared state store backs multiple server instances, a run, task, or session created on one instance MUST be observable and resumable from another instance. |
+| AW-DEPLOY-13 | MUST NOT | In a multi-instance fleet sharing one state store, the server MUST NOT allow the same run to be executed concurrently by more than one instance. |
+| AW-DEPLOY-14 | MUST | The server MUST enforce a bound on concurrent in-flight runs and, when the bound is reached, MUST either queue the invocation or refuse it with a typed back-pressure failure rather than spawning work without limit. |
+| AW-DEPLOY-15 | MUST | A back-pressured invocation that the server queues rather than refuses MUST be surfaced to the client as a task in a working or queued state rather than blocking synchronously without acknowledgment. |
+| AW-DEPLOY-16 | MUST | On graceful shutdown the server MUST persist all in-flight run, task, and session state before exiting so that no acknowledged work is lost. |
+| AW-GAP-13 | SHOULD | On initiation of graceful shutdown the server SHOULD refuse new invocations with a typed back-pressure error while allowing in-flight runs to reach a persisted checkpoint. |
+
+### Extended
+
+| Id | Level | Requirement |
+|---|---|---|
+| AW-CONF-10 | MUST | Vendor-specific or experimental fields, tools, and resources MUST be carried under a reserved extension namespace that cannot collide with standard specification names. |
+| AW-CONF-11 | MUST NOT | An extension MUST NOT alter the semantics of any standard tool, parameter, resource, or task status, and MUST be purely additive to the standard surface. |
+| AW-CONF-12 | MUST | A server MUST reject a request that depends on a capability tier or extension it has not advertised by returning a typed unsupported-capability error rather than degrading, ignoring, or coercing it silently. |
+| AW-BATCH-1 | SHOULD | A server SHOULD offer bulk invocation (a message-batches analog): many prompt calls submitted as one unit, expressed as a task, non-blocking, priced or rate-classed distinctly from interactive runs. |
+
+## Appendix F: Conformance profiles
+
+A server advertises the tiers it implements. Each tier subsumes the tiers above it in this list (a Bus-tier server is also Core and Sessions conformant). To conform at a tier, a server MUST satisfy every MUST/MUST NOT in that tier, SHOULD satisfy every SHOULD/SHOULD NOT, and MAY implement the MAY items.
+
+### Core tier
+
+Subsumes: (none).
+
+- Required (MUST): AW-PROMPT-1, AW-PROMPT-2, AW-PROMPT-3, AW-PROMPT-4, AW-PROMPT-5, AW-PROMPT-6, AW-PROMPT-7, AW-PROMPT-8, AW-PROMPT-9, AW-PROMPT-11, AW-PROMPT-12, AW-PROMPT-14, AW-PROMPT-15, AW-AGENT-1, AW-AGENT-2, AW-AGENT-3, AW-AGENT-4, AW-AGENT-5, AW-AGENT-6, AW-AGENT-7, AW-AGENT-8, AW-AGENT-9, AW-AGENT-10, AW-SURFACE-1, AW-SURFACE-2, AW-SURFACE-3, AW-SURFACE-5, AW-SURFACE-6, AW-SURFACE-7, AW-SURFACE-8, AW-SURFACE-9, AW-SURFACE-10, AW-SURFACE-11, AW-SURFACE-12, AW-SURFACE-13, AW-SURFACE-14, AW-DEPLOY-3, AW-DEPLOY-4, AW-ERR-1, AW-ERR-2, AW-ERR-3, AW-ERR-4, AW-ERR-7, AW-ERR-8, AW-ERR-9, AW-ERR-10, AW-ERR-11, AW-ERR-12, AW-ART-1, AW-ART-2, AW-ART-3, AW-ART-4, AW-ART-5, AW-ART-6, AW-ART-7, AW-ART-11, AW-IDENT-3, AW-CONF-1, AW-CONF-2, AW-CONF-3, AW-CONF-4, AW-CONF-5, AW-CONF-6, AW-CONF-7, AW-CONF-8, AW-CONF-13, AW-CONF-14, AW-PAGE-1, AW-MODEL-1, AW-GAP-1, AW-GAP-2, AW-GAP-12
+- Recommended (SHOULD): AW-PROMPT-13, AW-AGENT-12, AW-ERR-5, AW-ART-13, AW-VER-1
+- Optional (MAY): AW-FILE-1
+
+### Sessions tier
+
+Subsumes: Core.
+
+- Required (MUST): AW-SESSION-1, AW-SESSION-2, AW-SESSION-4, AW-SESSION-5, AW-SESSION-6, AW-SESSION-7, AW-SESSION-8, AW-SESSION-9, AW-SESSION-10, AW-SESSION-11, AW-SESSION-12, AW-SESSION-13, AW-SESSION-14, AW-DEPLOY-1
+- Recommended (SHOULD): (none)
+- Optional (MAY): (none)
+
+### Bus tier
+
+Subsumes: Core, Sessions.
+
+- Required (MUST): AW-BUS-1, AW-BUS-3, AW-BUS-4, AW-BUS-5, AW-BUS-6, AW-BUS-7, AW-BUS-8, AW-BUS-9, AW-BUS-11, AW-BUS-12, AW-BUS-13, AW-BUS-14, AW-DEPLOY-8, AW-IDENT-11, AW-GAP-5, AW-GAP-6, AW-GAP-8
+- Recommended (SHOULD): AW-GAP-7
+- Optional (MAY): AW-BUS-2
+
+### Scheduling tier
+
+Subsumes: Core, Sessions, Bus.
+
+- Required (MUST): AW-SCHED-1, AW-SCHED-3, AW-SCHED-4, AW-SCHED-5, AW-SCHED-6, AW-SCHED-7, AW-SCHED-8, AW-SCHED-9, AW-SCHED-10, AW-SCHED-11, AW-SCHED-12, AW-SCHED-13, AW-DEPLOY-6, AW-IDENT-14, AW-GAP-3, AW-GAP-4
+- Recommended (SHOULD): (none)
+- Optional (MAY): (none)
+
+### Observability tier
+
+Subsumes: Core, Sessions, Bus, Scheduling.
+
+- Required (MUST): AW-PROMPT-10, AW-SCHED-2, AW-SCHED-14, AW-OBS-1, AW-OBS-2, AW-OBS-3, AW-OBS-4, AW-OBS-5, AW-OBS-6, AW-OBS-7, AW-OBS-8, AW-OBS-9, AW-OBS-10, AW-OBS-11, AW-OBS-13, AW-OBS-15, AW-OBS-16, AW-OBS-17, AW-SURFACE-4, AW-DEPLOY-2, AW-ERR-6, AW-ART-8, AW-IDENT-10, AW-IDENT-13, AW-CONF-9, AW-GAP-9, AW-GAP-10, AW-GAP-11
+- Recommended (SHOULD): AW-AGENT-15, AW-OBS-14, AW-COST-1, AW-USAGE-1
+- Optional (MAY): (none)
+
+### Governance tier
+
+Subsumes: Core, Sessions, Bus, Scheduling, Observability.
+
+- Required (MUST): AW-AGENT-13, AW-AGENT-14, AW-SESSION-3, AW-BUS-10, AW-OBS-12, AW-GOV-1, AW-GOV-2, AW-GOV-3, AW-GOV-4, AW-GOV-5, AW-GOV-6, AW-GOV-7, AW-GOV-8, AW-GOV-9, AW-GOV-10, AW-GOV-11, AW-GOV-12, AW-GOV-13, AW-GOV-14, AW-GOV-15, AW-GOV-16, AW-GOV-17, AW-GOV-18, AW-DEPLOY-7, AW-ERR-13, AW-ERR-14, AW-ART-9, AW-ART-10, AW-ART-12, AW-IDENT-1, AW-IDENT-2, AW-IDENT-4, AW-IDENT-5, AW-IDENT-6, AW-IDENT-7, AW-IDENT-8, AW-IDENT-9, AW-IDENT-12, AW-IDENT-15
+- Recommended (SHOULD): AW-IDENT-16, AW-RATE-1, AW-GAP-14
+- Optional (MAY): AW-ART-14
+
+### Deployment tier
+
+Subsumes: Core, Sessions, Bus, Scheduling, Observability, Governance.
+
+- Required (MUST): AW-AGENT-11, AW-SURFACE-15, AW-DEPLOY-5, AW-DEPLOY-9, AW-DEPLOY-10, AW-DEPLOY-11, AW-DEPLOY-12, AW-DEPLOY-13, AW-DEPLOY-14, AW-DEPLOY-15, AW-DEPLOY-16
+- Recommended (SHOULD): AW-SESSION-15, AW-GAP-13
+- Optional (MAY): (none)
+
+### Extended tier
+
+Subsumes: Core, Sessions, Bus, Scheduling, Observability, Governance, Deployment.
+
+- Required (MUST): AW-CONF-10, AW-CONF-11, AW-CONF-12
+- Recommended (SHOULD): AW-BATCH-1
+- Optional (MAY): (none)
+
+### Reconciliation notes
+
+- Overlaps flagged: AW-PROMPT-1 and AW-SURFACE-1 both mandate that the single prompt operation projects onto exactly one MCP tool.; AW-PROMPT-2 and AW-AGENT-3 both require the prompt to be the sole required input and all backend parameters to be optional.; AW-PROMPT-3 and AW-AGENT-4 both state the optional-parameter resolution precedence (invocation over agent profile over deployment default); AW-PROMPT-3 is a strict subset of AW-AGENT-4.; AW-PROMPT-4 and AW-AGENT-9 both require an unsupported backend parameter to raise a typed failure and forbid silent drop/coercion (AW-ERR-8 is the broader superset of the same rule).; AW-PROMPT-7 and AW-SURFACE-10 both fix the task status enumeration to exactly working/input_required/completed/failed/cancelled (identical obligation).; AW-PROMPT-6 and AW-SURFACE-9 both require task-augmented execution per SEP-2663 with tasks/get retrieval (AW-SURFACE-9 is the superset adding tasks/update, tasks/cancel, notifications/tasks).; AW-PROMPT-9 and AW-SURFACE-11 both require token/progress streaming to be opt-in and delivered on the MCP progress channel, kept out of the result payload.; AW-AGENT-8 and AW-SURFACE-8 both require the backend's supported parameter/capability set to be discoverable through the MCP surface.; AW-OBS-4 and AW-SURFACE-4 both require each run to be a subscribable push resource at run://<id> rather than polled.; AW-DEPLOY-4 and AW-SURFACE-13 both forbid cancelling a running task solely because the initiating client disconnects (near-identical wording).; AW-OBS-12 and AW-IDENT-13 both forbid exposing backend-secret material (hidden session token, credentials, keys) in run records/feeds; AW-IDENT-13 is the broadest superset also covering logs and resource payloads.; AW-ERR-13 and AW-IDENT-13 both forbid backend session tokens/credentials from appearing in error responses.; AW-OBS-3 and AW-SCHED-2 both require recording each run's trigger kind so provenance is distinguishable after the fact (AW-OBS-2 also carries this field).; AW-AGENT-14 and AW-GOV-15 both require sealing a run from ambient host/user state unless the agent explicitly opts in (hermetic execution).; AW-BUS-8 and AW-ART-2 both forbid a bus post from embedding a large payload and require it to carry a reference/URI instead.
+- Gaps identified (addressed as AW-GAP-*): No general (non-gate) mid-run elicitation: the spec only defines input_required for world-write approval (AW-GOV-2/3/4). An agent that needs clarifying information from the client mid-turn has no defined way to suspend to input_required and be answered via tasks/update.; No timeout rule for a non-gate input_required suspension: AW-GOV-9 only covers gate elicitations, so a general clarification elicitation could hang indefinitely.; No schedule lifecycle management on the MCP surface: AW-SCHED-* define a schedule's properties and AW-DEPLOY-6 persists them, but nothing obligates register/list/update/delete of schedules through the surface, nor that a deleted schedule stops firing.; No pause/disable for a schedule short of deletion.; No client-facing publish operation: AW-BUS-3 says a publish fires subscribers, but nothing lets an authorized external client inject a message onto a channel.; No enumeration of channels or of agents' channel subscriptions; only the feed (AW-OBS-9) records traffic.; No runtime subscribe/unsubscribe: AW-BUS-2 binds subscriptions in configuration only.; No poison-message / dead-letter handling: AW-BUS-13 mandates at-least-once restart-durable delivery via a per-subscriber cursor, but a repeatedly failing subscriber turn could block its cursor forever with no redelivery bound or dead-letter.; No observability event when a post is suppressed at the cascade depth bound (AW-BUS-10), unlike the parallel AW-SCHED-14 for skipped/coalesced ticks.; The run record (AW-OBS-2) does not capture or reference the input prompt or the effective resolved parameter set; AW-AGENT-15 covers resolved params only as a SHOULD and omits the prompt, so a run is not fully reproducible/auditable.; No durable retrievability of a completed run's final output: AW-OBS-16 keeps the record after the MCP task result is reaped but does not require the output/result itself to remain reachable for the retention window.; No discoverable catalog of configured agents (name, backend tag, accepted parameters) so a client can select an agent without trial invocation; capability negotiation (AW-SURFACE-7/8) advertises the surface but not the agent roster.; No graceful-shutdown draining behavior: AW-DEPLOY-16 persists in-flight state but nothing requires refusing new invocations while draining.; No surfacing of backend availability nor a typed backend-unavailable pre-dispatch error distinct from backend-upstream (AW-ERR-2).
 
 ## Open questions
 
