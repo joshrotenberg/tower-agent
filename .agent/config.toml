@@ -18,3 +18,12 @@ disallowed_tools = ["Bash(rm:*)"]
 max_turns = 8
 # add_dirs = ["../shared"]           # extra directories this agent may access
 # config_dir = ".agent/env/tester"   # this agent's own CLAUDE_CONFIG_DIR
+
+# A scheduled agent: the server fires its schedule_prompt on the cron cadence
+# (5-field, or 6-field with a leading seconds field). Ticks share a session, so
+# it accumulates memory across runs.
+[agents.backlog]
+system = "You groom the backlog for this repository."
+# cwd = "../foo"                     # the repo this agent tends
+schedule = "0 */6 * * *"             # every six hours
+schedule_prompt = "Review the open issues and pick the next one to work on."

@@ -216,7 +216,9 @@ a live model.
 - **M2** sessions: our minted id decoupled from the backend token, the registry
   (`SessionStore`, memory + a JSON file store), backend resume, the `sessions`
   tool, and `agent sessions`. (done)
-- **M3** scheduling: agents with cron, the server runtime and scheduler.
+- **M3** scheduling: agents with a cron `schedule` + `schedule_prompt`, a
+  per-agent scheduler task (croner, optional seconds), ticks that share a session
+  for memory, `serve` starting the scheduler, and `agent tick`. (done)
 - **M4** inter-agent communication: structured result, channels, directed
   threads, the depth bound, turn context.
 - **M5** observability rounded out (feed/idle over MCP); the codex backend.

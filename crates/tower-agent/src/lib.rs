@@ -19,11 +19,13 @@ pub mod config;
 pub mod error;
 pub mod mcp;
 pub mod params;
+pub mod schedule;
 pub mod session;
 
 pub use backend::{Backend, BackendError, Event, Outcome, StubBackend};
-pub use config::{AgentDef, Config, Defaults};
+pub use config::{AgentDef, Config, Defaults, ScheduledAgent};
 pub use error::RunError;
 pub use mcp::{Server, router};
 pub use params::{Call, Params};
+pub use schedule::{ScheduleError, SchedulerHandle};
 pub use session::{FileSessionStore, MemorySessionStore, SessionInfo, SessionStore};
