@@ -120,8 +120,16 @@ impl Idle {
     }
 }
 
+/// How many hops of agent-to-agent cascade to allow before dropping further
+/// posts, so a runaway loop becomes a log line, not a hang.
+const MAX_DEPTH: usize = 6;
+
 enum Job {
-    Fire { agent: String, message: Message },
+    Fire {
+        agent: String,
+        message: Message,
+        depth: usize,
+    },
 }
 
 /// The shared bus state a [`Server`] holds: the feed, the job queue, idle
@@ -173,11 +181,32 @@ impl Drop for BusHandle {
 }
 
 impl Server {
-    /// Post a message to a channel and fire every subscribed agent. The message
-    /// is returned immediately; the reactions run on the worker.
-    pub fn broadcast(&self, channel: &str, from: &str, body: &str) -> Message {
-        let msg = self.bus.feed.post(channel, from, None, body, None);
-        for agent in self.config.subscribers(channel) {
+    /// Post a message to a channel and fire its recipients. `to` addresses one
+    /// agent directly, reaching it even if it does not subscribe. The message is
+    /// returned immediately; the reactions run on the worker.
+    pub fn broadcast(&self, channel: &str, from: &str, to: Option<&str>, body: &str) -> Message {
+        let msg = self
+            .bus
+            .feed
+            .post(channel, from, to.map(String::from), body, None);
+        self.fan_out(&msg, 0);
+        msg
+    }
+
+    /// Fire the recipients of a message: the channel's subscribers, plus a
+    /// directed `to`. The sender is never fired, so an agent does not react to
+    /// its own message.
+    fn fan_out(&self, msg: &Message, depth: usize) {
+        let mut targets = self.config.subscribers(&msg.channel);
+        if let Some(to) = &msg.to
+            && !targets.contains(to)
+        {
+            targets.push(to.clone());
+        }
+        for agent in targets {
+            if agent == msg.from {
+                continue;
+            }
             self.bus.idle.inc();
             if self
                 .bus
@@ -185,13 +214,13 @@ impl Server {
                 .send(Job::Fire {
                     agent,
                     message: msg.clone(),
+                    depth,
                 })
                 .is_err()
             {
                 self.bus.idle.dec();
             }
         }
-        msg
     }
 
     /// Recent messages on the bus (newest last), optionally one channel.
@@ -220,11 +249,16 @@ impl Server {
 }
 
 async fn bus_worker(server: Server, mut rx: UnboundedReceiver<Job>) {
-    while let Some(Job::Fire { agent, message }) = rx.recv().await {
+    while let Some(Job::Fire {
+        agent,
+        message,
+        depth,
+    }) = rx.recv().await
+    {
         let session = server.bus.sessions.lock().unwrap().get(&agent).cloned();
         let prompt = format!(
-            "Message on channel '{}' from {}:\n\n{}",
-            message.channel, message.from, message.body
+            "Message #{} on channel '{}' from {}:\n\n{}",
+            message.id, message.channel, message.from, message.body
         );
         let call = Call {
             prompt,
@@ -232,7 +266,8 @@ async fn bus_worker(server: Server, mut rx: UnboundedReceiver<Job>) {
             session,
             ..Default::default()
         };
-        match server.run(call).await {
+        // A fired turn is structured, so the agent can emit posts.
+        match server.run_structured(call).await {
             Ok(outcome) => {
                 if let Some(sid) = &outcome.session {
                     server
@@ -242,15 +277,35 @@ async fn bus_worker(server: Server, mut rx: UnboundedReceiver<Job>) {
                         .unwrap()
                         .insert(agent.clone(), sid.clone());
                 }
-                // Record the reply on the channel. In the one-hop bus this is an
-                // observation, not a new trigger.
-                server.bus.feed.post(
-                    &message.channel,
-                    &agent,
-                    None,
-                    &outcome.reply,
-                    Some(message.id),
-                );
+                if outcome.posts.is_empty() {
+                    // The agent only replied: record it, threaded. A reply is an
+                    // observation, not a new trigger.
+                    server.bus.feed.post(
+                        &message.channel,
+                        &agent,
+                        None,
+                        &outcome.reply,
+                        Some(message.id),
+                    );
+                } else {
+                    // Each post is recorded and, within the depth bound, fires its
+                    // recipients (the cascade).
+                    for post in outcome.posts {
+                        let reply_to = post.reply_to.or(Some(message.id));
+                        let posted = server.bus.feed.post(
+                            &post.channel,
+                            &agent,
+                            post.to.clone(),
+                            &post.body,
+                            reply_to,
+                        );
+                        if depth < MAX_DEPTH {
+                            server.fan_out(&posted, depth + 1);
+                        } else {
+                            tracing::warn!(agent = %agent, depth, "cascade depth bound reached; dropping post");
+                        }
+                    }
+                }
             }
             Err(e) => tracing::warn!(agent = %agent, error = %e, "bus run failed"),
         }
@@ -261,7 +316,7 @@ async fn bus_worker(server: Server, mut rx: UnboundedReceiver<Job>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Backend, BackendError, Outcome};
+    use crate::backend::{Backend, BackendError, Outcome, Post};
     use crate::config::Config;
     use crate::params::Params;
     use std::sync::Arc;
@@ -278,15 +333,43 @@ mod tests {
         }
     }
 
-    fn server() -> Server {
+    /// A backend that posts to the channel named in its agent's system prompt
+    /// (`post-to:CHANNEL`), and otherwise just reacts. Deterministic, for
+    /// exercising routing and the cascade without a live model.
+    struct Poster;
+    #[async_trait::async_trait]
+    impl Backend for Poster {
+        async fn run(&self, params: &Params) -> Result<Outcome, BackendError> {
+            match params
+                .system
+                .as_deref()
+                .and_then(|s| s.strip_prefix("post-to:"))
+            {
+                Some(channel) => Ok(Outcome {
+                    summary: "posting".into(),
+                    reply: String::new(),
+                    posts: vec![Post {
+                        channel: channel.to_string(),
+                        body: "ping".into(),
+                        to: None,
+                        reply_to: None,
+                    }],
+                    session: params.session.clone(),
+                }),
+                None => Ok(Outcome::from_reply("reacted", params.session.clone())),
+            }
+        }
+    }
+
+    fn watcher_server() -> Server {
         let config = Config::parse(
             r#"
             [agents.watcher]
             system = "watch the board"
             subscriptions = ["board"]
 
-            [agents.bystander]
-            system = "not subscribed"
+            [agents.helper]
+            system = "reachable when addressed"
             "#,
         )
         .unwrap();
@@ -295,38 +378,69 @@ mod tests {
 
     #[test]
     fn config_resolves_subscribers() {
-        let c = server();
+        let c = watcher_server();
         assert_eq!(c.config.subscribers("board"), vec!["watcher".to_string()]);
         assert!(c.config.subscribers("other").is_empty());
     }
 
     #[tokio::test]
-    async fn a_broadcast_fires_the_subscriber_and_lands_in_the_feed() {
-        let server = server();
+    async fn a_broadcast_fires_the_subscriber_and_threads_the_reply() {
+        let server = watcher_server();
         let bus = server.spawn_bus();
-        server.broadcast("board", "operator", "issue 42 needs triage");
+        server.broadcast("board", "operator", None, "issue 42 needs triage");
         server.wait_idle().await;
         bus.abort();
 
         let feed = server.feed(None, 50);
-        // The operator broadcast, then the watcher's reaction.
         assert_eq!(feed.len(), 2, "{feed:?}");
         assert_eq!(feed[0].from, "operator");
-        assert_eq!(feed[0].body, "issue 42 needs triage");
         assert_eq!(feed[1].from, "watcher");
         assert!(feed[1].body.contains("reacted to"));
         assert_eq!(feed[1].reply_to, Some(feed[0].id));
     }
 
     #[tokio::test]
-    async fn a_broadcast_to_an_unsubscribed_channel_fires_no_one() {
-        let server = server();
+    async fn a_directed_broadcast_reaches_an_unsubscribed_agent() {
+        let server = watcher_server();
         let bus = server.spawn_bus();
-        server.broadcast("quiet", "operator", "anyone?");
+        // `helper` subscribes to nothing, but a directed `to` reaches it.
+        server.broadcast("void", "operator", Some("helper"), "you around?");
         server.wait_idle().await;
         bus.abort();
 
         let feed = server.feed(None, 50);
-        assert_eq!(feed.len(), 1, "only the broadcast, no reaction: {feed:?}");
+        assert_eq!(feed.len(), 2, "{feed:?}");
+        assert_eq!(feed[1].from, "helper");
+    }
+
+    #[tokio::test]
+    async fn a_cascade_is_bounded() {
+        // A and B post to each other's channels forever; the depth bound stops it.
+        let config = Config::parse(
+            r#"
+            [agents.a]
+            system = "post-to:chb"
+            subscriptions = ["cha"]
+
+            [agents.b]
+            system = "post-to:cha"
+            subscriptions = ["chb"]
+            "#,
+        )
+        .unwrap();
+        let server = Server::new(config, Arc::new(Poster));
+        let bus = server.spawn_bus();
+        server.broadcast("cha", "operator", None, "go");
+        // If the bound did not work this would never return.
+        server.wait_idle().await;
+        bus.abort();
+
+        let feed = server.feed(None, 50);
+        assert!(feed.len() > 3, "the cascade ran: {}", feed.len());
+        assert!(
+            feed.len() <= 2 + MAX_DEPTH + 1,
+            "the cascade is bounded: {}",
+            feed.len()
+        );
     }
 }

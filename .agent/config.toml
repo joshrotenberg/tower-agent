@@ -34,3 +34,15 @@ schedule_prompt = "Review the open issues and pick the next one to work on."
 system = "You triage incoming reports. Reply with a one-line triage verdict."
 model = "haiku"
 subscriptions = ["board"]
+
+# Two agents that converse on the 'debate' channel. The analyst subscribes; the
+# critic is reached by a directed reply. The cascade is depth-bounded. Try:
+#   agent broadcast debate "Should we rewrite the scheduler as fully async?"
+[agents.analyst]
+system = "You debate on the 'debate' channel. Make one brief point (one sentence), then post a reply on 'debate' with `to` set to \"critic\" asking for pushback. Stop after a few exchanges."
+model = "haiku"
+subscriptions = ["debate"]
+
+[agents.critic]
+system = "You debate on the 'debate' channel. When addressed, push back in one sentence, then post a reply on 'debate' with `to` set to \"analyst\". Stop after a few exchanges."
+model = "haiku"

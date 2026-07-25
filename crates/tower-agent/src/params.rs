@@ -69,4 +69,8 @@ pub struct Params {
     pub session: Option<String>,
     /// The environment the backend runs in (its `CLAUDE_CONFIG_DIR`), if any.
     pub config_dir: Option<String>,
+    /// Ask the backend for a structured result (so the agent can emit `posts`).
+    /// Set for bus turns; a direct prompt stays unstructured, keeping the
+    /// streaming path clean.
+    pub structured: bool,
 }

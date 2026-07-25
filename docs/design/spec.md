@@ -220,9 +220,9 @@ a live model.
   per-agent scheduler task (croner, optional seconds), ticks that share a session
   for memory, `serve` starting the scheduler, and `agent tick`. (done)
 - **M4** inter-agent communication: structured result (done, #6), channels +
-  the subscribe trigger (done, #7, one-hop), then directed threads (#8), the
-  cascade + depth bound (#9), turn context (#10), and the feed/broadcast tools
-  (#11, started).
+  the subscribe trigger (done, #7), directed threads and the depth-bounded
+  cascade with structured production (done, #8 + #9). Turn context (#10) and the
+  rest of the feed/broadcast surface (#11) remain.
 - **M5** observability rounded out (feed/idle over MCP); the codex backend.
 - **M6** provoke on a real repo; add only the mechanical layers failures name.
 
