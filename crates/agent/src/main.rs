@@ -63,7 +63,15 @@ enum Cmd {
     },
     /// List the sessions (threads) in the registry.
     Sessions,
-    /// Serve the agent server over stdio (MCP).
+    /// Fire an agent's scheduled prompt once (for testing or manual runs).
+    Tick {
+        /// The agent to tick.
+        agent: String,
+        /// Continue a session so the tick accumulates memory.
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Serve the agent server over stdio (MCP); runs the scheduler too.
     Serve,
 }
 
@@ -139,13 +147,25 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Cmd::Tick { agent, session } => {
+            let outcome = server
+                .tick(&agent, session)
+                .await
+                .map_err(|e| anyhow::anyhow!("tick: {e}"))?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+        }
         Cmd::Serve => {
+            let scheduler = server
+                .spawn_scheduler()
+                .map_err(|e| anyhow::anyhow!("scheduler: {e}"))?;
+            if !scheduler.is_empty() {
+                eprintln!("scheduler: {} agent(s) scheduled", scheduler.len());
+            }
             let router = server.router();
             let mut transport = tower_mcp::StdioTransport::new(router);
-            transport
-                .run()
-                .await
-                .map_err(|e| anyhow::anyhow!("stdio serve: {e}"))?;
+            let result = transport.run().await;
+            drop(scheduler); // stop the ticks
+            result.map_err(|e| anyhow::anyhow!("stdio serve: {e}"))?;
         }
     }
     Ok(())

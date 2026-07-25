@@ -9,11 +9,13 @@ description = "An agent server exposed as an MCP surface: a prompt tool over a b
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
+croner.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
 toml.workspace = true
 tower-mcp.workspace = true
 tracing.workspace = true

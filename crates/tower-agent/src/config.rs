@@ -52,6 +52,25 @@ pub struct AgentDef {
     pub timeout: Option<u64>,
     /// This agent's own environment (`CLAUDE_CONFIG_DIR`).
     pub config_dir: Option<String>,
+    /// A cron expression: the server fires this agent's `schedule_prompt` on
+    /// this cadence. Optional seconds are supported (6-field).
+    pub schedule: Option<String>,
+    /// The prompt fired on each scheduled tick. A generic default is used when a
+    /// scheduled agent omits it.
+    pub schedule_prompt: Option<String>,
+}
+
+/// A scheduled agent: its name, cron expression, and the prompt fired each tick.
+#[derive(Debug, Clone)]
+pub struct ScheduledAgent {
+    pub name: String,
+    pub schedule: String,
+    pub prompt: String,
+}
+
+/// The default prompt for a scheduled tick when the agent does not set one.
+pub(crate) fn default_tick_prompt() -> String {
+    "Your scheduled run fired. Do your job for this cadence.".to_string()
 }
 
 impl Config {
@@ -74,6 +93,32 @@ impl Config {
     /// Whether an agent by this name is configured.
     pub fn has_agent(&self, name: &str) -> bool {
         self.agents.contains_key(name)
+    }
+
+    /// The agents that carry a schedule, with the prompt fired each tick.
+    pub fn scheduled_agents(&self) -> Vec<ScheduledAgent> {
+        self.agents
+            .iter()
+            .filter_map(|(name, a)| {
+                a.schedule.as_ref().map(|schedule| ScheduledAgent {
+                    name: name.clone(),
+                    schedule: schedule.clone(),
+                    prompt: a
+                        .schedule_prompt
+                        .clone()
+                        .unwrap_or_else(default_tick_prompt),
+                })
+            })
+            .collect()
+    }
+
+    /// The prompt to fire when ticking an agent: its `schedule_prompt`, or the
+    /// generic default.
+    pub fn tick_prompt(&self, agent: &str) -> String {
+        self.agents
+            .get(agent)
+            .and_then(|a| a.schedule_prompt.clone())
+            .unwrap_or_else(default_tick_prompt)
     }
 
     /// Resolve a call into the parameters a backend runs: the call over the

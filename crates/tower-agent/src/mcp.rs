@@ -123,6 +123,23 @@ impl Server {
         self.sessions.clone()
     }
 
+    /// The agents that carry a schedule.
+    pub fn scheduled_agents(&self) -> Vec<crate::config::ScheduledAgent> {
+        self.config.scheduled_agents()
+    }
+
+    /// Fire an agent's scheduled prompt once, optionally continuing a session.
+    /// This is what the scheduler runs on each tick, and what `agent tick` calls.
+    pub async fn tick(&self, agent: &str, session: Option<String>) -> Result<Outcome, RunError> {
+        let call = Call {
+            prompt: self.config.tick_prompt(agent),
+            agent: Some(agent.to_string()),
+            session,
+            ..Default::default()
+        };
+        self.run(call).await
+    }
+
     /// Build the MCP router that exposes this server.
     pub fn router(self) -> McpRouter {
         router(self)
