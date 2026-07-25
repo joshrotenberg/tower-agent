@@ -291,4 +291,47 @@ mod tests {
         assert!(outcome.text.contains('5'), "final text: {}", outcome.text);
         assert!(outcome.session.is_some());
     }
+
+    // Live session test: a minted id resumes the thread (real memory) and the
+    // registry records the turns.
+    //   cargo test -p tower-agent-claude -- --ignored
+    #[tokio::test]
+    #[ignore = "needs the claude CLI and auth"]
+    async fn live_session_resume_and_registry() {
+        use std::sync::Arc;
+        use tower_agent::{Call, Config, Server};
+
+        let server = Server::new(
+            Config::default(),
+            Arc::new(ClaudeBackend::new(Duration::from_secs(120))),
+        );
+        let first = server
+            .run(Call {
+                prompt: "Remember the word Kestrel. Acknowledge in one word.".into(),
+                model: Some("haiku".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("turn 1");
+        let id = first.session.clone().expect("a minted session id");
+
+        let second = server
+            .run(Call {
+                prompt: "What word did I ask you to remember? Reply with just that word.".into(),
+                model: Some("haiku".into()),
+                session: Some(id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("turn 2");
+        assert!(
+            second.text.to_lowercase().contains("kestrel"),
+            "resumed thread should recall the word, got: {}",
+            second.text
+        );
+        assert_eq!(second.session.as_deref(), Some(id.as_str()));
+
+        let info = server.sessions().get(&id).expect("session in registry");
+        assert_eq!(info.turns, 2);
+    }
 }

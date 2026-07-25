@@ -1,3 +1,4 @@
 /target
 .agent/env/
+.agent/sessions.json
 *.log

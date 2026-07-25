@@ -15,20 +15,34 @@ use tower_mcp::{CallToolResult, Error, McpRouter, NoParams, TaskSupportMode, Too
 use crate::backend::{Backend, Event, Outcome};
 use crate::config::Config;
 use crate::error::RunError;
-use crate::params::Call;
+use crate::params::{Call, Params};
+use crate::session::{MemorySessionStore, SessionStore};
 
-/// The server: a config and a backend. Cheap to clone (both are shared).
+/// The server: a config, a backend, and a session store. Cheap to clone (all are
+/// shared).
 #[derive(Clone)]
 pub struct Server {
     config: Arc<Config>,
     backend: Arc<dyn Backend>,
+    sessions: Arc<dyn SessionStore>,
 }
 
 impl Server {
+    /// A server with an in-memory session store.
     pub fn new(config: Config, backend: Arc<dyn Backend>) -> Self {
+        Self::with_sessions(config, backend, Arc::new(MemorySessionStore::new()))
+    }
+
+    /// A server with a specific session store (e.g. a file-backed one).
+    pub fn with_sessions(
+        config: Config,
+        backend: Arc<dyn Backend>,
+        sessions: Arc<dyn SessionStore>,
+    ) -> Self {
         Server {
             config: Arc::new(config),
             backend,
+            sessions,
         }
     }
 
@@ -37,8 +51,8 @@ impl Server {
         self.config.agent_names().cloned().collect()
     }
 
-    /// Validate a call: a named agent must exist, and the prompt must not be
-    /// empty.
+    /// Validate a call: a named agent must exist, the prompt must not be empty,
+    /// and a named session must exist.
     fn validate(&self, call: &Call) -> Result<(), RunError> {
         if call.prompt.trim().is_empty() {
             return Err(RunError::EmptyPrompt);
@@ -48,15 +62,47 @@ impl Server {
         {
             return Err(RunError::UnknownAgent(agent.clone()));
         }
+        if let Some(session) = &call.session
+            && !self.sessions.exists(session)
+        {
+            return Err(RunError::UnknownSession(session.clone()));
+        }
         Ok(())
     }
 
-    /// Resolve a call against config and run it through the backend. This is the
-    /// atom; the MCP `prompt` tool is a thin wrapper over it.
-    pub async fn run(&self, call: Call) -> Result<Outcome, RunError> {
+    /// Validate, pick the session id (mint a fresh one, or reuse the named one),
+    /// and resolve the params with the stored backend resume token.
+    fn prepare(&self, call: Call) -> Result<(String, Option<String>, Params), RunError> {
         self.validate(&call)?;
-        let params = self.config.resolve(call);
-        Ok(self.backend.run(&params).await?)
+        let id = match &call.session {
+            Some(id) => id.clone(),
+            None => self.sessions.mint(),
+        };
+        let agent = call.agent.clone();
+        let resume = self.sessions.backend_token(&id);
+        let mut params = self.config.resolve(call);
+        // The backend resumes with its own token; our session id is never handed
+        // to it. A fresh session has no token, so it starts clean.
+        params.session = resume;
+        Ok((id, agent, params))
+    }
+
+    /// Record the completed turn and return the outcome carrying our session id.
+    fn finish(&self, id: String, agent: Option<String>, mut outcome: Outcome) -> Outcome {
+        let backend_token = outcome.session.take();
+        let last = preview(&outcome.text);
+        self.sessions.record_turn(&id, agent, backend_token, last);
+        outcome.session = Some(id);
+        outcome
+    }
+
+    /// Resolve a call against config and run it through the backend. This is the
+    /// atom; the MCP `prompt` tool is a thin wrapper over it. A fresh call mints
+    /// a session and returns its id; passing that id back continues the thread.
+    pub async fn run(&self, call: Call) -> Result<Outcome, RunError> {
+        let (id, agent, params) = self.prepare(call)?;
+        let outcome = self.backend.run(&params).await?;
+        Ok(self.finish(id, agent, outcome))
     }
 
     /// Like [`Server::run`], but emitting incremental [`Event`]s to `events` as
@@ -67,9 +113,14 @@ impl Server {
         call: Call,
         events: UnboundedSender<Event>,
     ) -> Result<Outcome, RunError> {
-        self.validate(&call)?;
-        let params = self.config.resolve(call);
-        Ok(self.backend.run_streaming(&params, events).await?)
+        let (id, agent, params) = self.prepare(call)?;
+        let outcome = self.backend.run_streaming(&params, events).await?;
+        Ok(self.finish(id, agent, outcome))
+    }
+
+    /// The session registry: all threads, or one by id.
+    pub fn sessions(&self) -> Arc<dyn SessionStore> {
+        self.sessions.clone()
     }
 
     /// Build the MCP router that exposes this server.
@@ -93,10 +144,21 @@ pub fn router(server: Server) -> McpRouter {
         .instructions(
             "An agent server. The `prompt` tool runs a prompt through the backend; it requires \
              a `prompt`, `agent` selects a configured profile of defaults, and any other \
-             backend parameter is optional. `agents` lists the configured agents.",
+             backend parameter is optional. It returns a `session` id; pass it back to continue \
+             the thread. `agents` lists the configured agents; `sessions` lists the threads.",
         )
         .tool(prompt_tool(server.clone()))
-        .tool(agents_tool(server))
+        .tool(agents_tool(server.clone()))
+        .tool(sessions_tool(server))
+}
+
+/// A one-line, length-capped preview of an outcome, for the session registry.
+fn preview(text: &str) -> Option<String> {
+    let line = text.trim().lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(line.chars().take(120).collect())
 }
 
 fn prompt_tool(server: Server) -> Tool {
@@ -151,6 +213,28 @@ async fn run_streamed(server: Server, ctx: Context, call: Call) -> Result<CallTo
         Ok(Err(e)) => Err(Error::tool(e.to_string())),
         Err(e) => Err(Error::tool(format!("run task failed: {e}"))),
     }
+}
+
+#[derive(serde::Deserialize, JsonSchema)]
+struct SessionsInput {
+    /// One session by id; omit to list them all.
+    #[serde(default)]
+    id: Option<String>,
+}
+
+fn sessions_tool(server: Server) -> Tool {
+    ToolBuilder::new("sessions")
+        .description("List sessions (threads), or one by id")
+        .extractor_handler(
+            server,
+            |State(server): State<Server>, Json(input): Json<SessionsInput>| async move {
+                match input.id {
+                    Some(id) => CallToolResult::from_serialize(&server.sessions.get(&id)),
+                    None => CallToolResult::from_serialize(&server.sessions.list()),
+                }
+            },
+        )
+        .build()
 }
 
 fn agents_tool(server: Server) -> Tool {
@@ -285,8 +369,7 @@ mod tests {
                 "disallowed_tools": ["Write"],
                 "add_dirs": ["/tmp"],
                 "max_turns": 1,
-                "timeout": 42,
-                "session": "s-42"
+                "timeout": 42
             }),
         )
         .await;
@@ -300,7 +383,6 @@ mod tests {
         assert_eq!(p["add_dirs"][0], "/tmp");
         assert_eq!(p["max_turns"], 1);
         assert_eq!(p["timeout"], 42);
-        assert_eq!(p["session"], "s-42");
     }
 
     #[tokio::test]
@@ -337,12 +419,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_round_trips_through_outcome() {
+    async fn a_fresh_call_mints_a_session_that_can_continue() {
         let mut c = client().await;
-        let outcome: Value = c
-            .call_tool_typed("prompt", json!({ "prompt": "go", "session": "s-7" }))
+        // Fresh call: a session id is minted and returned.
+        let first: Value = c.call_tool_typed("prompt", json!({ "prompt": "go" })).await;
+        let id = first["session"].as_str().expect("a minted session id");
+        assert_eq!(id, "s1");
+
+        // The registry lists it with one turn.
+        let sessions: Vec<Value> = c.call_tool_typed("sessions", json!({})).await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["id"], "s1");
+        assert_eq!(sessions[0]["turns"], 1);
+
+        // Continue it: same id back, turn count bumps.
+        let second: Value = c
+            .call_tool_typed("prompt", json!({ "prompt": "again", "session": id }))
             .await;
-        assert_eq!(outcome["session"], "s-7");
+        assert_eq!(second["session"], "s1");
+        let one: Value = c.call_tool_typed("sessions", json!({ "id": "s1" })).await;
+        assert_eq!(one["turns"], 2);
+    }
+
+    #[tokio::test]
+    async fn unknown_session_is_an_error() {
+        let mut c = client().await;
+        let _err: Value = c
+            .call_tool_expect_error("prompt", json!({ "prompt": "go", "session": "nope" }))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sessions_get_unknown_is_null() {
+        let mut c = client().await;
+        let got: Value = c.call_tool_typed("sessions", json!({ "id": "nope" })).await;
+        assert!(got.is_null());
+    }
+
+    #[tokio::test]
+    async fn resume_passes_the_stored_backend_token() {
+        // A backend that reports its own token and records what it was resumed
+        // with, so we can prove the server threads the stored token through.
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Recorder {
+            seen: Mutex<Vec<Option<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl Backend for Recorder {
+            async fn run(&self, params: &crate::Params) -> Result<Outcome, crate::BackendError> {
+                self.seen.lock().unwrap().push(params.session.clone());
+                let n = self.seen.lock().unwrap().len();
+                Ok(Outcome {
+                    text: "ok".into(),
+                    session: Some(format!("bk-{n}")),
+                })
+            }
+        }
+
+        let backend = Arc::new(Recorder::default());
+        let server = Server::new(Config::default(), backend.clone());
+
+        // Turn 1: no session in, backend sees no resume token, returns bk-1.
+        let out1 = server
+            .run(Call {
+                prompt: "one".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = out1.session.unwrap();
+
+        // Turn 2: resume, the backend must see bk-1 (stored from turn 1).
+        server
+            .run(Call {
+                prompt: "two".into(),
+                session: Some(id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let seen = backend.seen.lock().unwrap().clone();
+        assert_eq!(seen, vec![None, Some("bk-1".to_string())]);
     }
 
     #[tokio::test]

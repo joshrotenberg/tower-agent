@@ -213,8 +213,9 @@ a live model.
   defaults and agent profiles; a one-shot CLI. Useful on its own. (done)
 - **M1** the claude backend; `serve` (stdio MCP); real prompts on a repo;
   `config_dir`-per-agent with token auth.
-- **M2** sessions: the `session` param, backend resume, the registry, the
-  `sessions` tool.
+- **M2** sessions: our minted id decoupled from the backend token, the registry
+  (`SessionStore`, memory + a JSON file store), backend resume, the `sessions`
+  tool, and `agent sessions`. (done)
 - **M3** scheduling: agents with cron, the server runtime and scheduler.
 - **M4** inter-agent communication: structured result, channels, directed
   threads, the depth bound, turn context.
