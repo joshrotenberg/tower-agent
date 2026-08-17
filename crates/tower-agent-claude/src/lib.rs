@@ -8,9 +8,11 @@
 //! a bypass-all control.
 //!
 //! Calls use the wrapper's process-group ownership and bridge the request's
-//! cancellation token into the in-flight execution future. On Unix, dropping
-//! that future kills the complete provider process group. The wrapper covers
-//! timeout and stdin setup failures through the same ownership path.
+//! cancellation token into its awaited cancellation path. On Unix, the wrapper
+//! terminates the complete provider process group and reaps the direct child
+//! before returning a terminal cancellation result. Timeout and stdin setup
+//! failures use the same ownership path. On non-Unix platforms, cleanup awaits
+//! the direct child but cannot guarantee ownership of its descendants.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -63,6 +65,7 @@ impl From<ClaudeEffort> for Effort {
 pub struct ClaudeService {
     binary: Option<PathBuf>,
     config_directory: Option<PathBuf>,
+    kill_grace: Option<Duration>,
 }
 
 impl ClaudeService {
@@ -71,6 +74,7 @@ impl ClaudeService {
         Self {
             binary: None,
             config_directory: None,
+            kill_grace: None,
         }
     }
 
@@ -83,6 +87,13 @@ impl ClaudeService {
     /// Use an isolated host-owned Claude configuration directory.
     pub fn with_config_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.config_directory = Some(directory.into());
+        self
+    }
+
+    /// Set how long cancellation waits before forcing the owned Claude
+    /// process group to stop.
+    pub fn with_kill_grace(mut self, duration: Duration) -> Self {
+        self.kill_grace = Some(duration);
         self
     }
 
@@ -108,6 +119,9 @@ impl ClaudeService {
                 )
             })?;
             builder = builder.env("CLAUDE_CONFIG_DIR", directory);
+        }
+        if let Some(duration) = self.kill_grace {
+            builder = builder.kill_grace(duration);
         }
         builder
             .build()
@@ -263,12 +277,10 @@ async fn run(
     }
 
     let _ = observer.try_emit(AgentEvent::Started);
-    let execution = query.execute_json(&claude);
-    tokio::pin!(execution);
-    let result = tokio::select! {
-        result = &mut execution => result.map_err(map_wrapper_error)?,
-        () = cancellation.cancelled() => return Err(cancelled_in_flight()),
-    };
+    let result = query
+        .execute_json_cancellable(&claude, cancellation.cancelled())
+        .await
+        .map_err(map_wrapper_error)?;
     if result.is_error {
         return Err(map_query_error(&result));
     }
@@ -324,15 +336,6 @@ fn cancelled_before_launch() -> AgentError {
         "Claude turn was cancelled before launch",
         FailurePhase::Admission,
         EffectState::None,
-    )
-}
-
-fn cancelled_in_flight() -> AgentError {
-    AgentError::new(
-        ErrorKind::Cancelled,
-        "Claude turn was cancelled",
-        FailurePhase::Running,
-        EffectState::Possible,
     )
 }
 
@@ -430,6 +433,12 @@ fn map_other_wrapper_error(error: claude_wrapper::Error) -> AgentError {
         Error::Timeout { timeout_seconds } => (
             ErrorKind::DeadlineExceeded,
             format!("claude command timed out after {timeout_seconds}s"),
+            FailurePhase::Running,
+            EffectState::Possible,
+        ),
+        Error::Cancelled => (
+            ErrorKind::Cancelled,
+            "Claude turn was cancelled".to_string(),
             FailurePhase::Running,
             EffectState::Possible,
         ),
@@ -720,8 +729,15 @@ mod tests {
             "tower-agent-claude-cancel-{}.sh",
             std::process::id()
         ));
-        std::fs::write(&path, "#!/bin/sh\ncat >/dev/null\nexec sleep 30\n")
-            .expect("write blocking fake Claude CLI");
+        let pid_path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-cancel-{}.pid",
+            std::process::id()
+        ));
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\nsleep 30 </dev/null &\nchild=$!\nprintf 'parent=%s\\nchild=%s\\n' \"$$\" \"$child\" > '{}'\nwait \"$child\"\n",
+            pid_path.display()
+        );
+        std::fs::write(&path, script).expect("write blocking fake Claude CLI");
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
@@ -731,8 +747,24 @@ mod tests {
             Turn::new("hello").with_options(ClaudeOptions::default()),
             CallContext::new().with_cancellation(cancellation.clone()),
         );
-        let call = tokio::spawn(ClaudeService::new().with_binary(&path).oneshot(request));
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let call = tokio::spawn(
+            ClaudeService::new()
+                .with_binary(&path)
+                .with_kill_grace(Duration::from_millis(10))
+                .oneshot(request),
+        );
+        for _ in 0..1000 {
+            if pid_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            pid_path.exists(),
+            "fake Claude did not record its process tree"
+        );
+        let pids =
+            std::fs::read_to_string(&pid_path).expect("fake Claude recorded its process tree");
         cancellation.cancel();
         let error = tokio::time::timeout(Duration::from_secs(2), call)
             .await
@@ -740,9 +772,22 @@ mod tests {
             .expect("provider task must not panic")
             .expect_err("cancelled call must fail");
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(pid_path);
 
         assert_eq!(error.kind, ErrorKind::Cancelled);
         assert_eq!(error.phase, FailurePhase::Running);
         assert_eq!(error.effects, EffectState::Possible);
+        for line in pids.lines() {
+            let (_, pid) = line.split_once('=').expect("pid line has a key");
+            let output = std::process::Command::new("ps")
+                .args(["-o", "state=", "-p", pid])
+                .output()
+                .expect("ps is available");
+            let state = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                state.trim().is_empty() || state.trim().starts_with('Z'),
+                "process {pid} survived terminal settlement with state {state:?}"
+            );
+        }
     }
 }

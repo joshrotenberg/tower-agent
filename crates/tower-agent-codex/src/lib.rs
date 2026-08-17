@@ -7,7 +7,10 @@
 //!
 //! Fresh and resumed turns send their prompts over stdin. The wrapper owns a
 //! process group for every call, and this service bridges the request
-//! cancellation token into the in-flight execution future.
+//! cancellation token into its awaited cancellation path. On Unix, terminal
+//! settlement follows process-group termination and direct-child reaping. On
+//! non-Unix platforms, cleanup awaits the direct child but cannot guarantee
+//! ownership of its descendants.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -52,6 +55,7 @@ pub struct CodexOptions {
 pub struct CodexService {
     binary: Option<PathBuf>,
     codex_home: Option<PathBuf>,
+    termination_grace: Option<Duration>,
 }
 
 impl CodexService {
@@ -60,6 +64,7 @@ impl CodexService {
         Self {
             binary: None,
             codex_home: None,
+            termination_grace: None,
         }
     }
 
@@ -72,6 +77,13 @@ impl CodexService {
     /// Set the host-local `CODEX_HOME` used for every call through this service.
     pub fn with_codex_home(mut self, path: impl Into<PathBuf>) -> Self {
         self.codex_home = Some(path.into());
+        self
+    }
+
+    /// Set how long an in-flight cancellation waits before forcing the owned
+    /// Codex process group to stop.
+    pub fn with_termination_grace(mut self, duration: Duration) -> Self {
+        self.termination_grace = Some(duration);
         self
     }
 
@@ -97,6 +109,9 @@ impl CodexService {
                 )
             })?;
             builder = builder.env("CODEX_HOME", directory);
+        }
+        if let Some(duration) = self.termination_grace {
+            builder = builder.termination_grace(duration);
         }
         builder.build().map_err(map_launch_error)
     }
@@ -137,19 +152,19 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             }
 
             let _ = observer.try_emit(AgentEvent::Started);
-            let result = {
-                let execution = async {
-                    match &turn.session {
-                        Some(session) => resume_command(&turn, session).execute_json(&codex).await,
-                        None => fresh_command(&turn).execute_json(&codex).await,
-                    }
-                };
-                tokio::pin!(execution);
-                tokio::select! {
-                    result = &mut execution => result.map_err(map_run_error)?,
-                    () = cancellation.cancelled() => return Err(cancelled_in_flight()),
+            let result = match &turn.session {
+                Some(session) => {
+                    resume_command(&turn, session)
+                        .execute_json_cancellable(&codex, cancellation.cancelled())
+                        .await
+                }
+                None => {
+                    fresh_command(&turn)
+                        .execute_json_cancellable(&codex, cancellation.cancelled())
+                        .await
                 }
             };
+            let result = result.map_err(map_run_error)?;
 
             let outcome = adapt_outcome(result, turn.session, started.elapsed());
             let _ = observer.try_emit(AgentEvent::OutputDelta {
@@ -560,8 +575,15 @@ mod tests {
             "tower-agent-codex-cancel-{}.sh",
             std::process::id()
         ));
-        std::fs::write(&path, "#!/bin/sh\ncat >/dev/null\nexec sleep 30\n")
-            .expect("write blocking fake Codex CLI");
+        let pid_path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-cancel-{}.pid",
+            std::process::id()
+        ));
+        let script = format!(
+            "#!/bin/sh\ncat >/dev/null\nsleep 30 </dev/null &\nchild=$!\nprintf 'parent=%s\\nchild=%s\\n' \"$$\" \"$child\" > '{}'\nwait \"$child\"\n",
+            pid_path.display()
+        );
+        std::fs::write(&path, script).expect("write blocking fake Codex CLI");
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
@@ -571,8 +593,24 @@ mod tests {
             Turn::new("hello").with_options(CodexOptions::default()),
             CallContext::new().with_cancellation(cancellation.clone()),
         );
-        let call = tokio::spawn(CodexService::new().with_binary(&path).oneshot(request));
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let call = tokio::spawn(
+            CodexService::new()
+                .with_binary(&path)
+                .with_termination_grace(Duration::from_millis(10))
+                .oneshot(request),
+        );
+        for _ in 0..1000 {
+            if pid_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            pid_path.exists(),
+            "fake Codex did not record its process tree"
+        );
+        let pids =
+            std::fs::read_to_string(&pid_path).expect("fake Codex recorded its process tree");
         cancellation.cancel();
         let error = tokio::time::timeout(Duration::from_secs(2), call)
             .await
@@ -580,10 +618,23 @@ mod tests {
             .expect("provider task must not panic")
             .expect_err("cancelled call must fail");
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(pid_path);
 
         assert_eq!(error.kind, ErrorKind::Cancelled);
         assert_eq!(error.phase, FailurePhase::Running);
         assert_eq!(error.effects, EffectState::Possible);
+        for line in pids.lines() {
+            let (_, pid) = line.split_once('=').expect("pid line has a key");
+            let output = std::process::Command::new("ps")
+                .args(["-o", "state=", "-p", pid])
+                .output()
+                .expect("ps is available");
+            let state = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                state.trim().is_empty() || state.trim().starts_with('Z'),
+                "process {pid} survived terminal settlement with state {state:?}"
+            );
+        }
     }
 
     #[tokio::test]
