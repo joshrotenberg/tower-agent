@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The preserved MCP-first tower-agent server while the Tower-native kernel is evaluated."
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Compatibility MCP-first host for the Tower-native tower-agent kernel."
 
 [dependencies]
 tower-agent.workspace = true

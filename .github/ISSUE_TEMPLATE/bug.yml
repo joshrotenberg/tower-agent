@@ -1,0 +1,42 @@
+name: Bug report
+description: Report an observed service, middleware, provider, or compatibility-host failure.
+title: "bug: "
+body:
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - tower-agent kernel
+        - middleware
+        - Claude provider
+        - Codex provider
+        - tower-agent-server compatibility host
+        - MCP example or projection
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the request, layer order, provider, and smallest repeatable sequence.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected contract
+      description: Name the readiness, cancellation, effect, evidence, or projection rule involved.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Rust version, operating system, wrapper/CLI versions, and relevant features.

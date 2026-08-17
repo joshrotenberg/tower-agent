@@ -1,5 +1,9 @@
 # tower-agent
 
+[![CI](https://github.com/joshrotenberg/tower-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/tower-agent/actions/workflows/ci.yml)
+[![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-93450a.svg)](https://www.rust-lang.org)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+
 Tower-native services and middleware for finite agent operations.
 
 `tower-agent` is an execution library, not an agent server and not an MCP
@@ -15,6 +19,13 @@ application
 ```
 
 The core crate has no normal dependency on `tower-mcp`.
+
+## Project status
+
+This is an experimental `0.1` workspace. The Tower service kernel is the
+adopted direction and its middleware laws are tested, but the public API is not
+yet stable. Real-provider in-flight cancellation is not yet a kernel guarantee;
+see the limitations below before using writable providers unattended.
 
 ## The service atom
 
@@ -109,13 +120,12 @@ The corresponding integration test proves that the same middleware still wraps
 the call through MCP. `tower-mcp` is only a development dependency of the core
 crate.
 
-## Current migration state
+## Compatibility host
 
-The previous MCP-first implementation is preserved as `tower-agent-server` so
-the pivot can be evaluated without deleting working behavior. It still contains
-configuration, sessions, scheduling, the bus, runs, budget, and the existing MCP
-surface. `BackendService` temporarily adapts its original `Backend` trait to the
-new owned Tower contract.
+The previous MCP-first implementation is preserved as `tower-agent-server`
+during migration. It still contains configuration, sessions, scheduling, the
+bus, runs, budget, and the existing MCP surface. `BackendService` temporarily
+adapts its original `Backend` trait to the new owned Tower contract.
 
 The Claude and Codex crates now expose Tower-native services by default. Their
 original `Backend` implementations exist only behind a `legacy-server` feature,
@@ -155,9 +165,14 @@ Run the complete check suite with:
 just check
 ```
 
-The adopted design and the remaining research questions are in
-[`docs/design/tower-service-kernel.md`](docs/design/tower-service-kernel.md).
+## Documentation
+
+The [documentation index](docs/README.md) distinguishes the adopted kernel
+contract from historical MCP-server design material. Start with the
+[service-kernel design](docs/design/tower-service-kernel.md) for architecture
+and [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and change discipline.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at
+your option.

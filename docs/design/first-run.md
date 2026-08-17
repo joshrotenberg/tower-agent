@@ -1,5 +1,9 @@
 # First run: provoking tower-agent on a real repo
 
+> Historical experiment for the preserved MCP-first host. Its bus, scheduler,
+> and server backlog are not the `tower-agent` kernel roadmap. See
+> [`../README.md`](../README.md) for the documentation authority map.
+
 The stochastic-first method: point the fabric at a real repository, watch what it
 does, and add only the mechanical layers the failures name. This is the findings
 log from the first run (#15).

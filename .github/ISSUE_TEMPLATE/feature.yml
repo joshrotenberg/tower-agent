@@ -1,0 +1,32 @@
+name: Feature proposal
+description: Propose evidence-backed kernel, middleware, or provider work.
+title: "feat: "
+body:
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Observed need
+      description: Describe the real consumer or failure that makes this mechanical layer necessary.
+    validations:
+      required: true
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Proposed invariant or boundary
+      description: State what becomes mechanically true and how it remains protocol-neutral.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Required proof
+      description: List deterministic service laws, race tests, or fake-binary process tests.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This cannot live entirely in a downstream scheduler, fleet, workflow, store, or protocol adapter.
+          required: true

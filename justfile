@@ -3,8 +3,10 @@
 # Format, lint, and test. Run before every push.
 check:
     cargo fmt --all -- --check
-    cargo clippy --all-targets -- -D warnings
-    cargo test
+    ./scripts/check-core-deps.sh
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    cargo test --workspace --all-targets --all-features --locked
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --locked --no-deps
 
 fmt:
     cargo fmt --all
