@@ -588,19 +588,42 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs the codex CLI and auth"]
-    async fn live_prompt() {
-        let outcome = CodexService::new()
+    async fn live_fresh_and_resume() {
+        const MEMORY_TOKEN: &str = "tower-agent-resume-7b91f2";
+
+        let service = CodexService::new();
+        let fresh = service
+            .clone()
             .oneshot(request(
-                "Reply with exactly the word: pong",
+                &format!(
+                    "Remember the token {MEMORY_TOKEN}. Reply with exactly the word: fresh-pong"
+                ),
                 CodexOptions::default(),
             ))
             .await
-            .expect("run");
+            .expect("run fresh turn");
         assert!(
-            outcome.output.to_lowercase().contains("pong"),
-            "got: {}",
-            outcome.output
+            fresh.output.to_lowercase().contains("fresh-pong"),
+            "fresh output: {}",
+            fresh.output
         );
-        assert!(outcome.session.is_some());
+        let session = fresh.session.expect("fresh turn must return a session");
+
+        let resumed = service
+            .oneshot(AgentRequest::new(
+                Turn::new(
+                    "Reply with exactly the token I asked you to remember in the previous turn",
+                )
+                .with_options(CodexOptions::default())
+                .resume(session.clone()),
+            ))
+            .await
+            .expect("resume returned session");
+        assert!(
+            resumed.output.contains(MEMORY_TOKEN),
+            "resumed output: {}",
+            resumed.output
+        );
+        assert_eq!(resumed.session.as_ref(), Some(&session));
     }
 }
