@@ -51,7 +51,7 @@ fn adapt_result(
         }
         Err(error) => {
             let structured = error_json(&error, operation_id);
-            let mut result = CallToolResult::error(error.to_string());
+            let mut result = CallToolResult::error(public_error_message(&error));
             result.structured_content = Some(structured);
             result
         }
@@ -68,7 +68,10 @@ fn outcome_json(outcome: &TurnOutcome, operation_id: OperationId) -> serde_json:
         })),
         "usage": outcome.usage.map(|usage| serde_json::json!({
             "input": usage.input,
+            "cachedInput": usage.cached_input,
+            "cacheWriteInput": usage.cache_write_input,
             "output": usage.output,
+            "reasoningOutput": usage.reasoning_output,
             "total": usage.total(),
         })),
         "cost": outcome.cost.as_ref().map(|cost| serde_json::json!({
@@ -87,13 +90,38 @@ fn error_json(error: &AgentError, operation_id: OperationId) -> serde_json::Valu
 }
 
 fn error_evidence_json(error: &AgentError) -> serde_json::Value {
+    let evidence = error.evidence.as_deref();
     serde_json::json!({
         "kind": error.kind.to_string(),
         "phase": error.phase.to_string(),
         "effects": error.effects.to_string(),
-        "message": error.message,
+        "message": public_error_message(error),
+        "evidence": {
+            "session": evidence.and_then(|evidence| evidence.session.as_ref()).map(|session| serde_json::json!({
+                "provider": session.provider(),
+                "present": true,
+            })),
+            "usage": evidence.and_then(|evidence| evidence.usage).map(|usage| serde_json::json!({
+                "input": usage.input,
+                "cachedInput": usage.cached_input,
+                "cacheWriteInput": usage.cache_write_input,
+                "output": usage.output,
+                "reasoningOutput": usage.reasoning_output,
+                "total": usage.total(),
+            })),
+            "cost": evidence.and_then(|evidence| evidence.cost.as_ref()).map(|cost| serde_json::json!({
+                "amount": cost.amount,
+                "currency": cost.currency,
+            })),
+            "durationMs": evidence.and_then(|evidence| evidence.duration).map(duration_millis),
+            "providerTurns": evidence.and_then(|evidence| evidence.provider_turns),
+        },
         "cause": error.cause.as_deref().map(error_evidence_json),
     })
+}
+
+fn public_error_message(error: &AgentError) -> String {
+    format!("agent operation failed ({})", error.kind)
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -108,7 +136,7 @@ async fn mcp_is_a_thin_projection_and_preserves_middleware() {
             return Err(
                 AgentError::deadline_exceeded(EffectState::Possible).with_cause(AgentError::new(
                     ErrorKind::Provider,
-                    "provider reported a partial edit",
+                    "provider reported a partial edit for host-private-session",
                     FailurePhase::Settlement,
                     EffectState::Reported,
                 )),
@@ -118,8 +146,9 @@ async fn mcp_is_a_thin_projection_and_preserves_middleware() {
         let mut outcome = TurnOutcome::new(request.body.prompt);
         outcome.session = Some(SessionHandle::new("fake", "host-private-session"));
         outcome.usage = Some(TokenUsage {
-            input: 13,
-            output: 8,
+            input: Some(13),
+            output: Some(8),
+            ..TokenUsage::default()
         });
         outcome.cost = Some(Cost::usd(0.25));
         outcome.duration = Some(Duration::from_millis(42));
@@ -196,6 +225,7 @@ async fn mcp_is_a_thin_projection_and_preserves_middleware() {
     assert_eq!(structured["cause"]["kind"], "provider");
     assert_eq!(structured["cause"]["phase"], "settlement");
     assert_eq!(structured["cause"]["effects"], "reported");
+    assert!(!structured.to_string().contains("host-private-session"));
     assert!(matches!(
         receipts
             .recv()

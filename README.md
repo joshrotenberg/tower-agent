@@ -2,30 +2,25 @@
 
 [![CI](https://github.com/joshrotenberg/tower-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/tower-agent/actions/workflows/ci.yml)
 [![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-93450a.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 Tower-native services and middleware for finite agent operations.
 
-`tower-agent` is an execution library, not an agent server and not an MCP
-implementation. A provider implements `tower::Service` for an owned agent
-request. Applications compose that service with middleware and may project it
-onto MCP, a CLI, HTTP, or another interface.
+A provider implements `tower::Service` for an owned agent request. Applications
+compose execution policy with ordinary Tower layers, then call the service from
+whatever interface they need.
 
 ```text
-application
-├── tower-agent
-├── provider service
-└── tower-mcp                 optional downstream projection
+interface
+    │
+policy layers
+    │
+provider service
 ```
 
-The core crate has no normal dependency on `tower-mcp`.
+## Status
 
-## Project status
-
-This is an experimental `0.1` workspace. The Tower service kernel is the
-adopted direction and its middleware laws are tested, but the public API is not
-yet stable. Real-provider in-flight cancellation is not yet a kernel guarantee;
-see the limitations below before using writable providers unattended.
+This is an experimental `0.1` workspace. The request, outcome, failure, event,
+and middleware contracts are typed and tested. API stability is not yet a goal.
 
 ## The service atom
 
@@ -45,34 +40,37 @@ assert_eq!(outcome.output, "inspect this repository");
 # }
 ```
 
-`AgentRequest<T>` separates a typed, potentially portable body from local call
-state such as operation identity, cancellation, deadline, and event observation.
-`Turn<O>` carries common turn data while leaving provider-specific controls in
-the generic `O` options type. Provider selection is a routing concern above a
-concrete service, so it is not a field on `Turn`.
+`AgentRequest<T>` separates the operation body from local call state such as
+identity, cancellation, deadline, and event observation. `Turn<O>` carries
+common turn data while leaving provider controls in the generic `O` options
+type. The concrete service identifies the provider.
 
-The terminal contract is typed:
+Terminal state is explicit:
 
-- `TurnOutcome` carries output and optional session, usage, cost, and timing
-  evidence.
-- `AgentError` preserves error kind, failure phase, and whether effects are
-  absent, possible, or reported.
-- `AgentEvent` provides nonblocking incremental observations without changing
+- `TurnOutcome` carries output plus optional session, token, cost, duration,
+  and provider-turn evidence.
+- `AgentError` preserves failure kind, execution phase, effect state, causal
+  settlement, and partial evidence from failed provider calls.
+- `AgentEvent` carries nonblocking incremental observations without changing
   the terminal response into a stream.
+
+Missing evidence stays absent. Provider session handles redact their values in
+`Debug`; an interface must mint its own public continuation identifier before
+exposing one.
 
 ## Middleware
 
-The first spike implements layers where agent semantics differ materially from
+The current layers cover the places where agent calls differ materially from
 ordinary request/response RPCs:
 
 | Layer | Behavior |
 |---|---|
 | `ValidateTurnLayer` | Rejects invalid prompts before provider execution. |
 | `AdmissionLayer` | Shares capacity across clones and returns typed `Busy` without a hidden queue. |
-| `DeadlineLayer` | Drains explicit cancellation or a deadline before returning typed terminal evidence. |
-| `ObserveLayer` | Records a typed terminal receipt with stable operation identity. |
-| `SuperviseLayer` | Keeps polling an owned inner call after caller drop while signalling cancellation. |
-| `CatchPanicLayer` | Converts a provider panic into typed terminal failure evidence. |
+| `DeadlineLayer` | Signals cancellation, retains the call, and waits for provider settlement. |
+| `ObserveLayer` | Records typed terminal receipts with stable operation identity. |
+| `SuperviseLayer` | Keeps polling an owned call after its interface caller disappears. |
+| `CatchPanicLayer` | Converts provider call panics into typed terminal failure. |
 
 A representative outside-to-inside stack is:
 
@@ -94,69 +92,46 @@ let service = ServiceBuilder::new()
     .service(EchoService);
 ```
 
-This ordering is semantic. Supervision owns the call after the interface caller
-goes away. Panic normalization sits inside observation so receipts see the
-typed terminal failure. Admission wraps deadline short-circuiting, ensuring its
-readiness permit is released even when a request is already expired, and its
-capacity remains occupied until cancellation cleanup actually finishes.
+Ordering is semantic. Supervision owns the call after caller drop. Panic
+normalization sits inside observation so receipts see typed terminal failure.
+Admission wraps deadline handling so capacity stays occupied through cleanup.
 
-Promising next layers include authority narrowing, deterministic context
-assembly, budget reservation and accounting, output-contract validation, event
-fanout/redaction, and circuit breaking. Retry, fallback, buffering, caching, and
-coalescing are unsafe by default for effectful agent work.
+The next useful middleware seams are authority narrowing, deterministic context
+assembly, budget reservation and reconciliation, output-contract validation,
+event redaction and fanout, and circuit breaking. Retry, fallback, buffering,
+caching, and coalescing require stronger effect guarantees before they are safe.
 
-## Optional MCP composition
+## Provider services
 
-MCP lives one level above the kernel. The
-[`tower_mcp_prompt` example](crates/tower-agent/examples/tower_mcp_prompt.rs)
-shows a downstream adapter that owns:
+`ClaudeService` and `CodexService` implement the same owned Tower contract with
+provider-specific option types. Both bridge request cancellation into the
+wrapper execution future. Their wrappers own a process group on Unix and kill
+the direct child on platforms without process groups.
 
-- its wire DTO and JSON Schema;
-- MCP cancellation and progress mapping;
-- text plus structured result encoding;
-- typed domain-error projection.
+Claude sends the user prompt over stdin; its system-prompt flags remain in argv.
+Codex sends fresh prompts over stdin; resumed prompts remain in argv until its
+resume command supports the same path. Provider controls are honor-or-refuse:
+unsupported combinations fail before work starts.
 
-The corresponding integration test proves that the same middleware still wraps
-the call through MCP. `tower-mcp` is only a development dependency of the core
-crate.
+Run the executable composition example with:
 
-## Compatibility host
+```text
+cargo run -p agent-example -- --provider codex "inspect this repository"
+```
 
-The previous MCP-first implementation is preserved as `tower-agent-server`
-during migration. It still contains configuration, sessions, scheduling, the
-bus, runs, budget, and the existing MCP surface. `BackendService` temporarily
-adapts its original `Backend` trait to the new owned Tower contract.
+Codex defaults to a read-only sandbox. `--workspace-write` is an explicit host
+choice and is refused for providers that cannot enforce that exact request.
 
-The Claude and Codex crates now expose Tower-native services by default. Their
-original `Backend` implementations exist only behind a `legacy-server` feature,
-which the preserved `agent` binary enables explicitly. Default provider
-dependency trees therefore do not pull in the MCP server.
-
-The native services intentionally configure no wrapper timeout. In the locked
-wrapper versions, timeout or future drop can return while provider descendants
-remain alive. They reject cancellation before launch, but do not claim safe
-in-flight termination. The kernel proves cancellation and drain semantics with
-cooperative fakes until wrapper process ownership is upgraded.
-
-The locked Claude wrapper can also return an I/O failure after a buffered-stdin
-write fails without proving that the direct child was killed and reaped.
-Recoverable Claude rail-stop errors carry session and accounting evidence that
-the current `AgentError` ABI cannot yet retain. Both are explicit provider
-follow-up work, not kernel guarantees.
-
-The native Claude path uses buffered JSON so it can send the user prompt over
-stdin; Claude system-prompt flags still remain in the child argument vector.
-The locked Codex wrapper has no stdin prompt path, so its native service
-documents that the entire prompt is visible there.
+The [transport example](crates/tower-agent/examples/tower_mcp_prompt.rs) shows an
+MCP adapter as downstream composition over the same typed service.
 
 ## Workspace
 
 ```text
-crates/tower-agent          protocol-neutral service types, fakes, and middleware
-crates/tower-agent-server   preserved MCP-first server and compatibility adapter
-crates/tower-agent-claude   Tower-native Claude service; optional legacy backend
-crates/tower-agent-codex    Tower-native Codex service; optional legacy backend
-crates/agent                preserved reference CLI/server binary
+crates/tower-agent          service types, fakes, and middleware
+crates/tower-agent-claude   Claude provider service
+crates/tower-agent-codex    Codex provider service
+examples/agent              executable provider composition
 ```
 
 Run the complete check suite with:
@@ -165,12 +140,9 @@ Run the complete check suite with:
 just check
 ```
 
-## Documentation
-
-The [documentation index](docs/README.md) distinguishes the adopted kernel
-contract from historical MCP-server design material. Start with the
-[service-kernel design](docs/design/tower-service-kernel.md) for architecture
-and [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and change discipline.
+The [architecture notes](docs/architecture.md) describe the service laws,
+layer ordering, process lifecycle, and middleware roadmap. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for local checks and change discipline.
 
 ## License
 

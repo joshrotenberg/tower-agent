@@ -4,8 +4,8 @@ set -eu
 
 tree="$(cargo tree --locked -p tower-agent --edges normal --prefix none)"
 
-if printf '%s\n' "$tree" | grep -Eq '^(tower-mcp|tower-agent-server) v'; then
-    printf '%s\n' "tower-agent must not depend on tower-mcp or tower-agent-server"
+if printf '%s\n' "$tree" | grep -Eq '^tower-mcp v'; then
+    printf '%s\n' "tower-agent must not depend on an interface implementation"
     exit 1
 fi
 

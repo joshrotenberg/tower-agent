@@ -11,20 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 description = "A Tower-native Claude Code service for tower-agent."
 
-[features]
-default = []
-legacy-server = ["dep:async-trait", "dep:serde", "dep:tokio", "dep:tower-agent-server"]
-
 [dependencies]
 tower-agent.workspace = true
 tower.workspace = true
-tower-agent-server = { workspace = true, optional = true }
 
-async-trait = { workspace = true, optional = true }
 claude-wrapper.workspace = true
-serde = { workspace = true, optional = true }
-serde_json.workspace = true
-tokio = { workspace = true, features = ["sync"], optional = true }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
