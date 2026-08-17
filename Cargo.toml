@@ -14,6 +14,10 @@ edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/joshrotenberg/tower-agent"
+homepage = "https://github.com/joshrotenberg/tower-agent"
+readme = "README.md"
+keywords = ["tower", "agents", "middleware", "async"]
+categories = ["asynchronous", "development-tools"]
 
 [workspace.dependencies]
 tower-agent = { path = "crates/tower-agent", version = "0.1.0" }

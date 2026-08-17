@@ -1,5 +1,9 @@
 # The bus vs the workflow methodology
 
+> Historical design note for the preserved MCP-first host. The bus is not part
+> of the `tower-agent` kernel contract or current core backlog. See
+> [`../README.md`](../README.md) for the documentation authority map.
+
 Two ways to get many agents working together. tower-agent implements one; the
 other is a solved problem it should compose with, not rebuild. This note records
 why.
