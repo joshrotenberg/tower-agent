@@ -30,7 +30,7 @@ async-trait = "0.1"
 chrono = "0.4"
 chrono-tz = "0.10"
 claude-wrapper = "0.13"
-codex-wrapper = "0.2"
+codex-wrapper = "0.3"
 clap = { version = "4", features = ["derive"] }
 croner = "3"
 futures-util = "0.3"
