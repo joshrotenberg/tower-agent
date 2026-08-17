@@ -1,8 +1,7 @@
 # Contributing
 
-`tower-agent` is an experimental Tower-native execution kernel. Changes should
-keep provider execution, policy middleware, and protocol projection as separate
-layers.
+`tower-agent` is an experimental Tower-native execution library. Changes keep
+provider execution, policy middleware, and interface adaptation separate.
 
 ## Setup
 
@@ -22,9 +21,9 @@ and warning-free rustdoc.
 
 ## Change discipline
 
-- Keep `tower-agent` protocol-neutral. `tower-mcp` may be a development
-  dependency for examples and tests, never a normal or optional core
-  dependency.
+- Keep `tower-agent` protocol-neutral. Interface libraries may be development
+  dependencies for examples and tests, never normal or optional core
+  dependencies.
 - State middleware ordering, clone-sharing, readiness, cancellation, and error
   preservation semantics explicitly.
 - Treat agent work as effectful. Retry, fallback, buffering, caching, and
@@ -33,8 +32,8 @@ and warning-free rustdoc.
   sandbox, limits, working-directory, or output requirements.
 - Use deterministic fakes for service laws. Use fake binaries for process
   ownership and cleanup claims.
-- Keep historical compatibility-host ideas out of the core backlog unless a
-  current consumer proves a protocol-neutral requirement.
+- Add core backlog only when a current consumer or provider proves a
+  protocol-neutral requirement.
 
 ## Pull requests
 

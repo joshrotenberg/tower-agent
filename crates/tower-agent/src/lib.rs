@@ -18,7 +18,7 @@ pub use error::{AgentError, EffectState, ErrorKind, FailurePhase};
 pub use event::{AgentEvent, EventObserver, EventSendError, EventSink};
 pub use fake::EchoService;
 pub use request::{AgentRequest, CallContext, OperationId, Turn};
-pub use response::{Cost, TokenUsage, TurnOutcome};
+pub use response::{Cost, FailureEvidence, TokenUsage, TurnOutcome};
 pub use service::{BoxTurnService, TurnRequest};
 pub use session::SessionHandle;
 pub use tokio_util::sync::CancellationToken;

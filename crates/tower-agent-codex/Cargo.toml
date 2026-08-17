@@ -11,24 +11,12 @@ keywords.workspace = true
 categories.workspace = true
 description = "A Tower-native finite-turn service backed by codex-wrapper."
 
-[features]
-default = []
-legacy-server = [
-    "dep:async-trait",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:tower-agent-server",
-]
-
 [dependencies]
 tower-agent.workspace = true
 tower.workspace = true
 
-async-trait = { workspace = true, optional = true }
 codex-wrapper.workspace = true
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
-tower-agent-server = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

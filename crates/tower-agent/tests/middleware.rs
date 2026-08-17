@@ -8,8 +8,8 @@ use tower_agent::layer::{
     SuperviseLayer, ValidateTurnLayer,
 };
 use tower_agent::{
-    AgentError, AgentRequest, CallContext, CancellationToken, EffectState, ErrorKind, Turn,
-    TurnOutcome,
+    AgentError, AgentRequest, CallContext, CancellationToken, Cost, EffectState, ErrorKind,
+    FailureEvidence, SessionHandle, Turn, TurnOutcome,
 };
 
 struct Harness {
@@ -336,12 +336,20 @@ async fn expired_deadline_does_not_strand_admission_capacity() {
 async fn deadline_preserves_stronger_settlement_evidence() {
     let provider = service_fn(|request: AgentRequest<Turn>| async move {
         request.context.cancellation().cancelled().await;
-        Err::<TurnOutcome, _>(AgentError::new(
-            ErrorKind::Provider,
-            "provider reported partial writes during cleanup",
-            tower_agent::FailurePhase::Settlement,
-            EffectState::Reported,
-        ))
+        Err::<TurnOutcome, _>(
+            AgentError::new(
+                ErrorKind::Provider,
+                "provider reported partial writes during cleanup",
+                tower_agent::FailurePhase::Settlement,
+                EffectState::Reported,
+            )
+            .with_evidence(FailureEvidence {
+                session: Some(SessionHandle::new("fake", "private-session")),
+                cost: Some(Cost::usd(0.25)),
+                provider_turns: Some(3),
+                ..FailureEvidence::default()
+            }),
+        )
     });
     let service = ServiceBuilder::new()
         .layer(SuperviseLayer::new())
@@ -357,8 +365,15 @@ async fn deadline_preserves_stronger_settlement_evidence() {
         .oneshot(request)
         .await
         .expect_err("deadline remains the primary failure");
+    let evidence = error.evidence.as_deref().expect("settlement evidence");
     assert_eq!(error.kind, ErrorKind::DeadlineExceeded);
     assert_eq!(error.effects, EffectState::Reported);
+    assert_eq!(evidence.cost, Some(Cost::usd(0.25)));
+    assert_eq!(evidence.provider_turns, Some(3));
+    assert_eq!(
+        evidence.session.as_ref().map(SessionHandle::value),
+        Some("private-session")
+    );
     let cause = error.cause.expect("settlement cause is retained");
     assert_eq!(cause.kind, ErrorKind::Provider);
     assert_eq!(cause.phase, tower_agent::FailurePhase::Settlement);

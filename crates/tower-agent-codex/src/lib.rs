@@ -5,19 +5,10 @@
 //! protocol surface; callers may compose it with `tower-agent` middleware and
 //! project it onto MCP, HTTP, a CLI, or another host.
 //!
-//! The locked `codex-wrapper` release buffers JSONL until the command exits and
-//! does not expose verified subprocess-tree termination. Consequently this
-//! service emits no incremental events, honors cancellation only before process
-//! launch, and configures no wrapper timeout: that release's timeout can return
-//! while leaving the child alive. A host can use `SuperviseLayer` to retain and
-//! poll the future after caller drop, but cancellation and a finite safe deadline
-//! remain blocked on a stronger wrapper process-ownership contract.
-//! `codex-wrapper` 0.2 also has no stdin prompt path for `exec`, so prompt text
-//! is present in the child argument vector. Hosts handling sensitive prompts
-//! should wait for a wrapper API that can avoid that exposure.
-//!
-//! Enable the `legacy-server` feature to expose the previous `CodexBackend`
-//! implementation for `tower-agent-server` during migration.
+//! Fresh turns send their prompts over stdin. The wrapper owns a process group
+//! for every call, and this service bridges the request cancellation token into
+//! the in-flight execution future. Resumed prompts still travel in argv because
+//! the wrapper's resume command does not yet expose a stdin path.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -30,14 +21,9 @@ use codex_wrapper::command::exec::ExecResumeCommand;
 use codex_wrapper::{Codex, ExecCommand, QueryResult};
 use tower::Service;
 use tower_agent::{
-    AgentError, AgentEvent, AgentRequest, CancellationToken, Cost, EffectState, ErrorKind,
-    FailurePhase, SessionHandle, Turn, TurnOutcome,
+    AgentError, AgentEvent, AgentRequest, CancellationToken, EffectState, ErrorKind, FailurePhase,
+    SessionHandle, TokenUsage, Turn, TurnOutcome,
 };
-
-#[cfg(feature = "legacy-server")]
-mod legacy;
-#[cfg(feature = "legacy-server")]
-pub use legacy::CodexBackend;
 
 const PROVIDER: &str = "codex";
 
@@ -53,7 +39,7 @@ pub struct CodexOptions {
     /// Override the Codex model for this turn.
     pub model: Option<String>,
     /// Extra directories made available to a fresh turn with `--add-dir`.
-    /// `codex-wrapper` 0.2 cannot apply these to `exec resume`, so resumed turns
+    /// `codex-wrapper` cannot apply these to `exec resume`, so resumed turns
     /// carrying any extra directory are rejected.
     pub additional_directories: Vec<PathBuf>,
     /// Explicit sandbox mode. When absent, fresh and resumed turns use
@@ -65,13 +51,23 @@ pub struct CodexOptions {
 /// A cloneable Tower service that runs one finite Codex turn per call.
 #[derive(Clone, Debug)]
 pub struct CodexService {
+    binary: Option<PathBuf>,
     codex_home: Option<PathBuf>,
 }
 
 impl CodexService {
-    /// Create a service without the unsafe timeout in `codex-wrapper` 0.2.
+    /// Create a service using the wrapper's default process-group ownership.
     pub fn new() -> Self {
-        Self { codex_home: None }
+        Self {
+            binary: None,
+            codex_home: None,
+        }
+    }
+
+    /// Override the `codex` executable, primarily for hermetic hosts and tests.
+    pub fn with_binary(mut self, path: impl Into<PathBuf>) -> Self {
+        self.binary = Some(path.into());
+        self
     }
 
     /// Set the host-local `CODEX_HOME` used for every call through this service.
@@ -86,6 +82,9 @@ impl CodexService {
 
     fn build_codex(&self, working_directory: Option<&Path>) -> Result<Codex, AgentError> {
         let mut builder = Codex::builder();
+        if let Some(binary) = &self.binary {
+            builder = builder.binary(binary);
+        }
         if let Some(directory) = working_directory {
             builder = builder.working_dir(directory.to_path_buf());
         }
@@ -134,18 +133,24 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             let started = Instant::now();
             let codex = service.build_codex(turn.working_directory.as_deref())?;
 
-            // This is the last cancellation point for which the current wrapper
-            // can honestly guarantee that no provider process has been launched.
             if cancellation.is_cancelled() {
                 return Err(cancelled_before_launch());
             }
 
             let _ = observer.try_emit(AgentEvent::Started);
-            let result = match &turn.session {
-                Some(session) => resume_command(&turn, session).execute_json(&codex).await,
-                None => fresh_command(&turn).execute_json(&codex).await,
-            }
-            .map_err(map_run_error)?;
+            let result = {
+                let execution = async {
+                    match &turn.session {
+                        Some(session) => resume_command(&turn, session).execute_json(&codex).await,
+                        None => fresh_command(&turn).execute_json(&codex).await,
+                    }
+                };
+                tokio::pin!(execution);
+                tokio::select! {
+                    result = &mut execution => result.map_err(map_run_error)?,
+                    () = cancellation.cancelled() => return Err(cancelled_in_flight()),
+                }
+            };
 
             let outcome = adapt_outcome(result, turn.session, started.elapsed());
             let _ = observer.try_emit(AgentEvent::OutputDelta {
@@ -204,7 +209,7 @@ fn prepare(
 
     if session.is_some() && !turn.options.additional_directories.is_empty() {
         return Err(AgentError::unsupported(
-            "codex-wrapper 0.2 cannot add directories to a resumed turn",
+            "codex-wrapper cannot add directories to a resumed turn",
         ));
     }
     let additional_directories = turn
@@ -241,7 +246,7 @@ fn compose_prompt(prompt: &str, system_prompt: Option<&str>) -> String {
 }
 
 fn fresh_command(turn: &PreparedTurn) -> ExecCommand {
-    let mut command = ExecCommand::new(turn.prompt.clone())
+    let mut command = ExecCommand::from_stdin(turn.prompt.clone())
         .sandbox(turn.sandbox.unwrap_or(SandboxMode::ReadOnly))
         .skip_git_repo_check();
     if let Some(model) = &turn.model {
@@ -280,7 +285,7 @@ fn adapt_outcome(
     prior_session: Option<String>,
     duration: Duration,
 ) -> TurnOutcome {
-    let output = result_text(&result);
+    let output = result.result;
     let session = result
         .thread_id
         .or(result.session_id)
@@ -288,30 +293,20 @@ fn adapt_outcome(
         .map(|value| SessionHandle::new(PROVIDER, value));
     let mut outcome = TurnOutcome::new(output);
     outcome.session = session;
-    outcome.cost = result.cost_usd.map(Cost::usd);
+    outcome.usage = result.usage.map(map_usage);
     outcome.duration = Some(duration);
     outcome
 }
 
-fn result_text(result: &QueryResult) -> String {
-    if !result.result.is_empty() {
-        return result.result.clone();
+fn map_usage(usage: codex_wrapper::TokenUsage) -> TokenUsage {
+    TokenUsage {
+        input: usage.input_tokens,
+        cached_input: usage.cached_input_tokens,
+        cache_write_input: usage.cache_write_input_tokens,
+        output: usage.output_tokens,
+        reasoning_output: usage.reasoning_output_tokens,
+        provider_total: usage.total(),
     }
-    result
-        .events
-        .iter()
-        .rev()
-        .find_map(|event| {
-            let item = event.extra.get("item")?;
-            if item.get("type").and_then(|value| value.as_str()) == Some("agent_message") {
-                item.get("text")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
 }
 
 fn cancelled_before_launch() -> AgentError {
@@ -320,6 +315,15 @@ fn cancelled_before_launch() -> AgentError {
         "Codex turn was cancelled before launch",
         FailurePhase::Admission,
         EffectState::None,
+    )
+}
+
+fn cancelled_in_flight() -> AgentError {
+    AgentError::new(
+        ErrorKind::Cancelled,
+        "Codex turn was cancelled",
+        FailurePhase::Running,
+        EffectState::Possible,
     )
 }
 
@@ -360,6 +364,7 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
             FailurePhase::Running,
             EffectState::Possible,
         ),
+        codex_wrapper::Error::Cancelled { .. } => cancelled_in_flight(),
         codex_wrapper::Error::CommandFailed { exit_code, .. } => AgentError::new(
             ErrorKind::Provider,
             format!("Codex command failed with exit code {exit_code}"),
@@ -413,10 +418,8 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--add-dir", "/work/extra"])
         );
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some("you are a helper\n\ndo it")
-        );
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        assert!(!args.iter().any(|arg| arg.contains("do it")));
     }
 
     #[tokio::test]
@@ -496,7 +499,7 @@ mod tests {
             result: "done".into(),
             session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
-            cost_usd: None,
+            usage: None,
             events: Vec::new(),
         };
 
@@ -505,6 +508,82 @@ mod tests {
             outcome.session.as_ref().map(SessionHandle::value),
             Some("thread-1")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fresh_turn_uses_stdin_and_maps_usage() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-success-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "case \" $* \" in *\" secret-prompt \"*) exit 91;; esac\n",
+                "prompt=$(cat)\n",
+                "[ \"$prompt\" = \"secret-prompt\" ] || exit 92\n",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n",
+                "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}'\n",
+            ),
+        )
+        .expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let outcome = CodexService::new()
+            .with_binary(&path)
+            .oneshot(request("secret-prompt", CodexOptions::default()))
+            .await
+            .expect("fake Codex run succeeds");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(outcome.output, "done");
+        assert_eq!(outcome.usage.and_then(TokenUsage::total), Some(5));
+        assert_eq!(
+            outcome.session.as_ref().map(SessionHandle::value),
+            Some("thread-1")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn in_flight_cancellation_settles_the_service_call() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-cancel-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(&path, "#!/bin/sh\ncat >/dev/null\nexec sleep 30\n")
+            .expect("write blocking fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let cancellation = CancellationToken::new();
+        let request = AgentRequest::with_context(
+            Turn::new("hello").with_options(CodexOptions::default()),
+            CallContext::new().with_cancellation(cancellation.clone()),
+        );
+        let call = tokio::spawn(CodexService::new().with_binary(&path).oneshot(request));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancellation.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .expect("cancelled call must settle")
+            .expect("provider task must not panic")
+            .expect_err("cancelled call must fail");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(error.kind, ErrorKind::Cancelled);
+        assert_eq!(error.phase, FailurePhase::Running);
+        assert_eq!(error.effects, EffectState::Possible);
     }
 
     #[tokio::test]

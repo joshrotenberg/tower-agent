@@ -11,14 +11,6 @@ check:
 fmt:
     cargo fmt --all
 
-# Run a single prompt through the stub backend.
-run prompt agent="scout":
-    cargo run -p agent -- run "{{prompt}}" --agent "{{agent}}"
-
-# List configured agents.
-list:
-    cargo run -p agent -- list
-
-# Serve the agent server over stdio (MCP).
-serve:
-    cargo run -p agent -- serve
+# Run one prompt through a native provider service.
+run prompt provider="claude":
+    cargo run -p agent-example -- --provider "{{provider}}" "{{prompt}}"

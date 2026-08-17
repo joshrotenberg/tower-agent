@@ -1,5 +1,5 @@
 name: Bug report
-description: Report an observed service, middleware, provider, or compatibility-host failure.
+description: Report an observed service, middleware, provider, or example failure.
 title: "bug: "
 body:
   - type: dropdown
@@ -11,8 +11,8 @@ body:
         - middleware
         - Claude provider
         - Codex provider
-        - tower-agent-server compatibility host
-        - MCP example or projection
+        - executable example
+        - interface adapter
     validations:
       required: true
   - type: textarea

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::FailureEvidence;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -83,13 +85,14 @@ impl EffectState {
 }
 
 /// A failure whose category and execution evidence survive middleware.
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq)]
 #[error("{kind}: {message}")]
 pub struct AgentError {
     pub kind: ErrorKind,
     pub message: String,
     pub phase: FailurePhase,
     pub effects: EffectState,
+    pub evidence: Option<Box<FailureEvidence>>,
     #[source]
     pub cause: Option<Box<AgentError>>,
 }
@@ -106,6 +109,7 @@ impl AgentError {
             message: message.into(),
             phase,
             effects,
+            evidence: None,
             cause: None,
         }
     }
@@ -157,7 +161,18 @@ impl AgentError {
 
     pub fn with_cause(mut self, cause: AgentError) -> Self {
         self.effects = self.effects.combine(cause.effects);
+        if let Some(cause_evidence) = cause.evidence.as_deref() {
+            match self.evidence.as_deref_mut() {
+                Some(evidence) => evidence.merge_missing(cause_evidence),
+                None => self.evidence = Some(Box::new(cause_evidence.clone())),
+            }
+        }
         self.cause = Some(Box::new(cause));
+        self
+    }
+
+    pub fn with_evidence(mut self, evidence: FailureEvidence) -> Self {
+        self.evidence = Some(Box::new(evidence));
         self
     }
 }
