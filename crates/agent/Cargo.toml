@@ -2,6 +2,7 @@
 name = "agent"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Reference binary for tower-agent: run a prompt or serve the agent server over MCP."
@@ -11,9 +12,9 @@ name = "agent"
 path = "src/main.rs"
 
 [dependencies]
-tower-agent.workspace = true
-tower-agent-claude.workspace = true
-tower-agent-codex.workspace = true
+tower-agent-server.workspace = true
+tower-agent-claude = { workspace = true, features = ["legacy-server"] }
+tower-agent-codex = { workspace = true, features = ["legacy-server"] }
 
 anyhow.workspace = true
 clap.workspace = true

@@ -1,5 +1,10 @@
 # Agent Worker MCP Server: A Contract for Agentic Work as an MCP Service
 
+> Historical north-star document for the preserved MCP-first server. It is not
+> the contract of the `tower-agent` core crate after the Tower-service pivot.
+> See [`tower-service-kernel.md`](tower-service-kernel.md) for the authoritative
+> kernel boundary.
+
 > A north-star specification for a general, language-agnostic Agent Worker MCP Server.
 
 ## Abstract

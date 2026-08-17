@@ -10,9 +10,9 @@ dependencies = [
  "clap",
  "serde_json",
  "tokio",
- "tower-agent",
  "tower-agent-claude",
  "tower-agent-codex",
+ "tower-agent-server",
  "tower-mcp",
  "tracing-subscriber",
 ]
@@ -1114,12 +1114,57 @@ dependencies = [
  "futures-util",
  "pin-project-lite",
  "sync_wrapper",
+ "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
 name = "tower-agent"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-mcp",
+]
+
+[[package]]
+name = "tower-agent-claude"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "claude-wrapper",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-agent",
+ "tower-agent-server",
+]
+
+[[package]]
+name = "tower-agent-codex"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "codex-wrapper",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-agent",
+ "tower-agent-server",
+]
+
+[[package]]
+name = "tower-agent-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1133,32 +1178,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tower",
+ "tower-agent",
  "tower-mcp",
  "tracing",
-]
-
-[[package]]
-name = "tower-agent-claude"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "claude-wrapper",
- "serde",
- "serde_json",
- "tokio",
- "tower-agent",
-]
-
-[[package]]
-name = "tower-agent-codex"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "codex-wrapper",
- "serde",
- "serde_json",
- "tokio",
- "tower-agent",
 ]
 
 [[package]]

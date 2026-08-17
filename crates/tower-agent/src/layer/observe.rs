@@ -1,0 +1,255 @@
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc;
+use tower::{Layer, Service};
+
+use crate::{AgentError, AgentRequest, EffectState, ErrorKind, FailurePhase, OperationId};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    pub operation_id: OperationId,
+    pub elapsed: Duration,
+    pub status: ReceiptStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReceiptStatus {
+    Succeeded,
+    Failed {
+        kind: ErrorKind,
+        phase: FailurePhase,
+        effects: EffectState,
+    },
+    Abandoned,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ReceiptSendError {
+    #[error("receipt observer is full")]
+    Full,
+    #[error("receipt observer is closed")]
+    Closed,
+}
+
+/// A nonblocking terminal receipt destination.
+pub trait ReceiptSink: Send + Sync + 'static {
+    fn try_record(&self, receipt: Receipt) -> Result<(), ReceiptSendError>;
+}
+
+#[derive(Clone)]
+pub struct ReceiptObserver(Arc<dyn ReceiptSink>);
+
+impl ReceiptObserver {
+    pub fn new(sink: impl ReceiptSink) -> Self {
+        Self(Arc::new(sink))
+    }
+
+    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<Receipt>) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (Self::new(ChannelReceiptSink(sender)), receiver)
+    }
+
+    pub fn try_record(&self, receipt: Receipt) -> Result<(), ReceiptSendError> {
+        self.0.try_record(receipt)
+    }
+}
+
+impl Default for ReceiptObserver {
+    fn default() -> Self {
+        Self::new(NoopReceiptSink)
+    }
+}
+
+impl fmt::Debug for ReceiptObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ReceiptObserver").field(&"..").finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ObserveLayer {
+    observer: ReceiptObserver,
+}
+
+impl ObserveLayer {
+    pub fn new(observer: ReceiptObserver) -> Self {
+        Self { observer }
+    }
+}
+
+impl<S> Layer<S> for ObserveLayer {
+    type Service = Observe<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        Observe {
+            inner,
+            observer: self.observer.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Observe<S> {
+    inner: S,
+    observer: ReceiptObserver,
+}
+
+impl<S, T> Service<AgentRequest<T>> for Observe<S>
+where
+    S: Service<AgentRequest<T>, Error = AgentError>,
+    S::Future: Send + 'static,
+    S::Response: Send + 'static,
+    T: 'static,
+{
+    type Response = S::Response;
+    type Error = AgentError;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: AgentRequest<T>) -> Self::Future {
+        let operation_id = request.context.operation_id();
+        let future = self.inner.call(request);
+        let mut guard = ReceiptGuard::new(self.observer.clone(), operation_id);
+
+        Box::pin(async move {
+            let result = future.await;
+            let status = match &result {
+                Ok(_) => ReceiptStatus::Succeeded,
+                Err(error) => ReceiptStatus::Failed {
+                    kind: error.kind,
+                    phase: error.phase,
+                    effects: error.effects,
+                },
+            };
+            guard.finish(status);
+            result
+        })
+    }
+}
+
+struct ReceiptGuard {
+    observer: ReceiptObserver,
+    operation_id: OperationId,
+    started: Instant,
+    finished: bool,
+}
+
+impl ReceiptGuard {
+    fn new(observer: ReceiptObserver, operation_id: OperationId) -> Self {
+        Self {
+            observer,
+            operation_id,
+            started: Instant::now(),
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, status: ReceiptStatus) {
+        self.finished = true;
+        let _ = self.observer.try_record(Receipt {
+            operation_id: self.operation_id,
+            elapsed: self.started.elapsed(),
+            status,
+        });
+    }
+}
+
+impl Drop for ReceiptGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.observer.try_record(Receipt {
+                operation_id: self.operation_id,
+                elapsed: self.started.elapsed(),
+                status: ReceiptStatus::Abandoned,
+            });
+        }
+    }
+}
+
+struct NoopReceiptSink;
+
+impl ReceiptSink for NoopReceiptSink {
+    fn try_record(&self, _receipt: Receipt) -> Result<(), ReceiptSendError> {
+        Ok(())
+    }
+}
+
+struct ChannelReceiptSink(mpsc::Sender<Receipt>);
+
+impl ReceiptSink for ChannelReceiptSink {
+    fn try_record(&self, receipt: Receipt) -> Result<(), ReceiptSendError> {
+        self.0.try_send(receipt).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => ReceiptSendError::Full,
+            mpsc::error::TrySendError::Closed(_) => ReceiptSendError::Closed,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tower::{Service, ServiceBuilder, ServiceExt, service_fn};
+
+    use super::*;
+    use crate::{AgentRequest, Turn, TurnOutcome};
+
+    #[tokio::test]
+    async fn records_typed_terminal_status_with_operation_identity() {
+        let (observer, mut receipts) = ReceiptObserver::channel(1);
+        let provider = service_fn(|_request: AgentRequest<Turn>| async {
+            Err::<TurnOutcome, _>(AgentError::invalid_request("bad input"))
+        });
+        let service = ServiceBuilder::new()
+            .layer(ObserveLayer::new(observer))
+            .service(provider);
+        let operation_id = OperationId::from_u64(42);
+        let request = AgentRequest::with_context(
+            Turn::new("hello"),
+            crate::CallContext::new().with_operation_id(operation_id),
+        );
+
+        let _ = service.oneshot(request).await;
+        let receipt = receipts.recv().await.expect("receipt");
+        assert_eq!(receipt.operation_id, operation_id);
+        assert_eq!(
+            receipt.status,
+            ReceiptStatus::Failed {
+                kind: ErrorKind::InvalidRequest,
+                phase: FailurePhase::Validation,
+                effects: EffectState::None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_before_first_poll_records_abandonment() {
+        let (observer, mut receipts) = ReceiptObserver::channel(1);
+        let provider = service_fn(|_request: AgentRequest<Turn>| async {
+            std::future::pending::<Result<TurnOutcome, AgentError>>().await
+        });
+        let mut service = ServiceBuilder::new()
+            .layer(ObserveLayer::new(observer))
+            .service(provider);
+        service.ready().await.expect("service ready");
+        let operation_id = OperationId::from_u64(7);
+        let request = AgentRequest::with_context(
+            Turn::new("hello"),
+            crate::CallContext::new().with_operation_id(operation_id),
+        );
+
+        let future = service.call(request);
+        drop(future);
+
+        let receipt = receipts.recv().await.expect("abandoned receipt");
+        assert_eq!(receipt.operation_id, operation_id);
+        assert_eq!(receipt.status, ReceiptStatus::Abandoned);
+    }
+}

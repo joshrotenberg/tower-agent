@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use tower_agent::{Backend, Call, Config, FileSessionStore, Server, StubBackend};
 use tower_agent_claude::ClaudeBackend;
 use tower_agent_codex::CodexBackend;
+use tower_agent_server::{Backend, Call, Config, FileSessionStore, Server, StubBackend};
 
 #[derive(Parser)]
 #[command(name = "agent", about = "an agent server over MCP")]
