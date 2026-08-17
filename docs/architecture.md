@@ -112,7 +112,7 @@ Current prompt placement:
 |---|---|---|
 | Claude | stdin | system-prompt flags in argv |
 | Codex fresh | stdin | composed prompt in stdin |
-| Codex resume | argv | composed prompt in argv |
+| Codex resume | stdin | composed prompt in stdin |
 
 The host owns launch configuration such as provider home and configuration
 directories. Portable request bodies do not carry ambient credentials or

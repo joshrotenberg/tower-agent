@@ -109,8 +109,8 @@ wrapper execution future. Their wrappers own a process group on Unix and kill
 the direct child on platforms without process groups.
 
 Claude sends the user prompt over stdin; its system-prompt flags remain in argv.
-Codex sends fresh prompts over stdin; resumed prompts remain in argv until its
-resume command supports the same path. Provider controls are honor-or-refuse:
+Codex sends fresh and resumed prompts over stdin. Provider controls are
+honor-or-refuse:
 unsupported combinations fail before work starts.
 
 Run the executable composition example with:

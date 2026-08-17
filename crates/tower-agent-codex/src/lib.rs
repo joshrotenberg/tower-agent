@@ -5,10 +5,9 @@
 //! protocol surface; callers may compose it with `tower-agent` middleware and
 //! project it onto MCP, HTTP, a CLI, or another host.
 //!
-//! Fresh turns send their prompts over stdin. The wrapper owns a process group
-//! for every call, and this service bridges the request cancellation token into
-//! the in-flight execution future. Resumed prompts still travel in argv because
-//! the wrapper's resume command does not yet expose a stdin path.
+//! Fresh and resumed turns send their prompts over stdin. The wrapper owns a
+//! process group for every call, and this service bridges the request
+//! cancellation token into the in-flight execution future.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -259,9 +258,8 @@ fn fresh_command(turn: &PreparedTurn) -> ExecCommand {
 }
 
 fn resume_command(turn: &PreparedTurn, session: &str) -> ExecResumeCommand {
-    let mut command = ExecResumeCommand::new()
+    let mut command = ExecResumeCommand::from_stdin(turn.prompt.clone())
         .session_id(session)
-        .prompt(turn.prompt.clone())
         .config(sandbox_config(
             turn.sandbox.unwrap_or(SandboxMode::ReadOnly),
         ))
@@ -476,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_enforces_the_read_only_default() {
+    fn resume_enforces_the_read_only_default_and_uses_stdin() {
         let turn = PreparedTurn {
             prompt: "continue".into(),
             working_directory: None,
@@ -491,6 +489,8 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""])
         );
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        assert!(!args.iter().any(|arg| arg.contains("continue")));
     }
 
     #[test]
