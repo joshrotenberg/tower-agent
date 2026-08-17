@@ -1,146 +1,162 @@
 # tower-agent
 
-An agent server exposed as an MCP surface. An agent and an MCP server are the
-same shape: expose agentic work as an MCP contract and let any client drive it,
-from a one-shot CLI to a hosted server.
+Tower-native services and middleware for finite agent operations.
 
-Built bottom-up from one primitive and enhanced. The full design is in
-[docs/design/spec.md](docs/design/spec.md); the roadmap is the
-[milestones and issues](https://github.com/joshrotenberg/tower-agent/issues).
+`tower-agent` is an execution library, not an agent server and not an MCP
+implementation. A provider implements `tower::Service` for an owned agent
+request. Applications compose that service with middleware and may project it
+onto MCP, a CLI, HTTP, or another interface.
 
-## The atom: the `prompt` tool
-
-The core is one MCP tool. It requires a `prompt` and optionally takes any
-parameter the backend takes, so the surface is a faithful projection of what the
-backend can do:
-
-```
-prompt(
-  prompt: string,          // required: the task/message
-  agent: string?,          // select a configured agent's defaults
-  system: string?,         // system prompt
-  append_system: string?,  // appended to the system prompt
-  model: string?,
-  effort: string?,         // low | medium | high
-  allowed_tools: [string]?,
-  disallowed_tools: [string]?,
-  add_dirs: [string]?,     // extra directories the agent may access
-  max_turns: int?,
-  cwd: string?,
-  timeout: int?,           // per-run seconds
-  session: string?,        // continue/resume a thread
-)
+```text
+application
+├── tower-agent
+├── provider service
+└── tower-mcp                 optional downstream projection
 ```
 
-Config supplies the defaults, so a call usually carries little. A named `agent`
-that does not exist is an error, and an empty prompt is rejected.
+The core crate has no normal dependency on `tower-mcp`.
 
-## Agents
+## The service atom
 
-An **agent** is a named bundle of default parameters plus a base prompt. It is
-config, not code. A call selects one with `agent` and may override any parameter.
+One finite turn is the initial operation:
 
-```toml
-[defaults]
-model = "sonnet"
+```rust
+use tower::ServiceExt;
+use tower_agent::{AgentRequest, EchoService, Turn};
 
-[agents.backlog]
-system = "You groom the backlog for this repository."
-cwd    = "../foo"                    # the repo this agent tends
-schedule = "0 */6 * * *"             # fire on a cadence (see Scheduling)
-schedule_prompt = "Review the open issues and pick the next one to work on."
+# async fn example() -> Result<(), tower_agent::AgentError> {
+let outcome = EchoService
+    .oneshot(AgentRequest::new(Turn::new("inspect this repository")))
+    .await?;
+
+assert_eq!(outcome.output, "inspect this repository");
+# Ok(())
+# }
 ```
 
-Point an agent at a repo with `cwd`, give it a role in `system`, and either
-prompt it directly or let its schedule tick it.
+`AgentRequest<T>` separates a typed, potentially portable body from local call
+state such as operation identity, cancellation, deadline, and event observation.
+`Turn<O>` carries common turn data while leaving provider-specific controls in
+the generic `O` options type. Provider selection is a routing concern above a
+concrete service, so it is not a field on `Turn`.
 
-## Sessions
+The terminal contract is typed:
 
-A session is a resumable thread. A fresh call mints a session id (`s1`, `s2`,
-...) and returns it; pass it back to continue the thread with memory. The id is
-ours; the backend's own resume token is an internal detail of the store, which
-keeps sessions backend-portable.
+- `TurnOutcome` carries output and optional session, usage, cost, and timing
+  evidence.
+- `AgentError` preserves error kind, failure phase, and whether effects are
+  absent, possible, or reported.
+- `AgentEvent` provides nonblocking incremental observations without changing
+  the terminal response into a stream.
 
-```
-$ agent run "My name for you is Orion. Acknowledge in one word."
-{ "text": "Orion.", "session": "s1" }
-$ agent run "What name did I give you?" --session s1
-{ "text": "Orion.", "session": "s1" }
-$ agent sessions
-s1     agent=-        turns=2   Orion.
-```
+## Middleware
 
-The `MemorySessionStore` is the default; the CLI uses a `FileSessionStore` so
-threads resume across invocations.
+The first spike implements layers where agent semantics differ materially from
+ordinary request/response RPCs:
 
-## Scheduling
-
-An agent with a `schedule` (cron, with optional 6-field seconds) fires its
-`schedule_prompt` on cadence when the server runs. Ticks share a session, so a
-scheduled agent accumulates memory. `agent tick <agent>` fires one run
-immediately.
-
-## Execution: sync, async, streaming
-
-A prompt can run for minutes, so the caller chooses how to wait, on native MCP
-mechanisms.
-
-- **Sync**: call `prompt`; it blocks and returns the outcome.
-- **Async**: the tool declares `taskSupport = optional`, so a client MAY call it
-  as a task, getting a handle to poll, wait on, or cancel.
-- **Streaming**: opt-in via the request progress token. Present, and assistant
-  text streams as progress notifications; absent, and only the final outcome
-  returns.
-
-## The MCP surface
-
-| tool | what |
+| Layer | Behavior |
 |---|---|
-| `prompt` | run a prompt (the atom); `agent` selects defaults, `session` continues a thread |
-| `agents` | list configured agents |
-| `sessions` | list threads, or one by id |
+| `ValidateTurnLayer` | Rejects invalid prompts before provider execution. |
+| `AdmissionLayer` | Shares capacity across clones and returns typed `Busy` without a hidden queue. |
+| `DeadlineLayer` | Drains explicit cancellation or a deadline before returning typed terminal evidence. |
+| `ObserveLayer` | Records a typed terminal receipt with stable operation identity. |
+| `SuperviseLayer` | Keeps polling an owned inner call after caller drop while signalling cancellation. |
+| `CatchPanicLayer` | Converts a provider panic into typed terminal failure evidence. |
 
-More tools (`broadcast`, `feed`) arrive with inter-agent communication.
+A representative outside-to-inside stack is:
 
-## Backends
+```rust
+use tower::ServiceBuilder;
+use tower_agent::EchoService;
+use tower_agent::layer::{
+    AdmissionLayer, CatchPanicLayer, DeadlineLayer, ObserveLayer,
+    ReceiptObserver, SuperviseLayer, ValidateTurnLayer,
+};
 
-A `Backend` is the one seam where a model backend lives; the core names none.
-
-- `tower-agent-claude`: runs prompts through the Claude Code CLI via
-  `claude-wrapper`, with streaming.
-- `StubBackend` (in the core): runs no model and echoes the resolved parameters,
-  a dry run and the basis for tests.
-- A codex backend is planned.
-
-## Layout
-
-```
-crates/tower-agent          the atom, config, sessions, scheduling, Backend trait, MCP surface
-crates/tower-agent-claude   the claude backend
-crates/agent                the reference binary
-```
-
-## Use
-
-```
-just list                       # configured agents
-just run "read the repo"        # one prompt (stub backend by default in the recipe)
-just serve                      # serve over stdio (MCP), with the scheduler
-just check                      # fmt, clippy, test
-
-agent run "<prompt>" [--agent NAME] [--model M] [--session s1]
-agent sessions                  # the session registry
-agent tick <agent>              # fire a scheduled prompt once
-agent serve                     # stdio MCP + scheduler
-agent --backend stub ...        # run without a live model
+let service = ServiceBuilder::new()
+    .layer(SuperviseLayer::new())
+    .layer(ObserveLayer::new(ReceiptObserver::default()))
+    .layer(CatchPanicLayer::new())
+    .layer(AdmissionLayer::single_flight())
+    .layer(DeadlineLayer::new())
+    .layer(ValidateTurnLayer::new())
+    .service(EchoService);
 ```
 
-## Status
+This ordering is semantic. Supervision owns the call after the interface caller
+goes away. Panic normalization sits inside observation so receipts see the
+typed terminal failure. Admission wraps deadline short-circuiting, ensuring its
+readiness permit is released even when a request is already expired, and its
+capacity remains occupied until cancellation cleanup actually finishes.
 
-M0 through M3 are done: the prompt tool, agents, sessions, scheduling, and the
-async/streaming execution model. Inter-agent communication, observability, and a
-codex backend are next; see the
-[milestones](https://github.com/joshrotenberg/tower-agent/milestones).
+Promising next layers include authority narrowing, deterministic context
+assembly, budget reservation and accounting, output-contract validation, event
+fanout/redaction, and circuit breaking. Retry, fallback, buffering, caching, and
+coalescing are unsafe by default for effectful agent work.
+
+## Optional MCP composition
+
+MCP lives one level above the kernel. The
+[`tower_mcp_prompt` example](crates/tower-agent/examples/tower_mcp_prompt.rs)
+shows a downstream adapter that owns:
+
+- its wire DTO and JSON Schema;
+- MCP cancellation and progress mapping;
+- text plus structured result encoding;
+- typed domain-error projection.
+
+The corresponding integration test proves that the same middleware still wraps
+the call through MCP. `tower-mcp` is only a development dependency of the core
+crate.
+
+## Current migration state
+
+The previous MCP-first implementation is preserved as `tower-agent-server` so
+the pivot can be evaluated without deleting working behavior. It still contains
+configuration, sessions, scheduling, the bus, runs, budget, and the existing MCP
+surface. `BackendService` temporarily adapts its original `Backend` trait to the
+new owned Tower contract.
+
+The Claude and Codex crates now expose Tower-native services by default. Their
+original `Backend` implementations exist only behind a `legacy-server` feature,
+which the preserved `agent` binary enables explicitly. Default provider
+dependency trees therefore do not pull in the MCP server.
+
+The native services intentionally configure no wrapper timeout. In the locked
+wrapper versions, timeout or future drop can return while provider descendants
+remain alive. They reject cancellation before launch, but do not claim safe
+in-flight termination. The kernel proves cancellation and drain semantics with
+cooperative fakes until wrapper process ownership is upgraded.
+
+The locked Claude wrapper can also return an I/O failure after a buffered-stdin
+write fails without proving that the direct child was killed and reaped.
+Recoverable Claude rail-stop errors carry session and accounting evidence that
+the current `AgentError` ABI cannot yet retain. Both are explicit provider
+follow-up work, not kernel guarantees.
+
+The native Claude path uses buffered JSON so it can send the user prompt over
+stdin; Claude system-prompt flags still remain in the child argument vector.
+The locked Codex wrapper has no stdin prompt path, so its native service
+documents that the entire prompt is visible there.
+
+## Workspace
+
+```text
+crates/tower-agent          protocol-neutral service types, fakes, and middleware
+crates/tower-agent-server   preserved MCP-first server and compatibility adapter
+crates/tower-agent-claude   Tower-native Claude service; optional legacy backend
+crates/tower-agent-codex    Tower-native Codex service; optional legacy backend
+crates/agent                preserved reference CLI/server binary
+```
+
+Run the complete check suite with:
+
+```text
+just check
+```
+
+The adopted design and the remaining research questions are in
+[`docs/design/tower-service-kernel.md`](docs/design/tower-service-kernel.md).
 
 ## License
 

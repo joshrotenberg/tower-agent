@@ -2,17 +2,29 @@
 name = "tower-agent-codex"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "A codex-wrapper backend for tower-agent."
+description = "A Tower-native finite-turn service backed by codex-wrapper."
+
+[features]
+default = []
+legacy-server = [
+    "dep:async-trait",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tower-agent-server",
+]
 
 [dependencies]
 tower-agent.workspace = true
+tower.workspace = true
 
-async-trait.workspace = true
+async-trait = { workspace = true, optional = true }
 codex-wrapper.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tower-agent-server = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

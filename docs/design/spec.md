@@ -1,5 +1,10 @@
 # tower-agent: spec
 
+> Historical pre-pivot design. This describes the preserved
+> `tower-agent-server` implementation. The authoritative core-crate direction is
+> [`tower-service-kernel.md`](tower-service-kernel.md), where MCP is an optional
+> downstream projection rather than the internal execution model.
+
 A clean-room spec for the agent server, built bottom-up from one primitive, in
 standard terms (agent, tool, prompt, session, schedule, channel). Everything here
 is validated by a stochastic-first experiment in the `repol` repo (its

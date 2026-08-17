@@ -2,25 +2,20 @@
 name = "tower-agent"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "An agent server exposed as an MCP surface: a prompt tool over a backend, with configurable agents."
+description = "Tower services and middleware for finite agent operations."
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-chrono.workspace = true
-chrono-tz.workspace = true
-croner.workspace = true
-schemars.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+futures-util.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
-toml.workspace = true
-tower-mcp.workspace = true
-tracing.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util.workspace = true
+tower.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tower-mcp = { workspace = true, features = ["testing"] }
