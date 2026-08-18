@@ -1,0 +1,35 @@
+[workspace]
+changelog_update = false
+git_release_enable = false
+git_tag_enable = false
+pr_draft = true
+release_always = false
+semver_check = true
+
+[[package]]
+name = "tower-agent"
+version_group = "tower-agent"
+release = true
+publish = true
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["tower-agent-claude", "tower-agent-codex"]
+git_release_enable = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+
+[[package]]
+name = "tower-agent-claude"
+version_group = "tower-agent"
+release = true
+publish = true
+
+[[package]]
+name = "tower-agent-codex"
+version_group = "tower-agent"
+release = true
+publish = true
+
+[[package]]
+name = "agent-example"
+release = false
