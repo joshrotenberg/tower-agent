@@ -11,6 +11,10 @@
 //! settlement follows process-group termination and direct-child reaping. On
 //! non-Unix platforms, cleanup awaits the direct child but cannot guarantee
 //! ownership of its descendants.
+//!
+//! Filesystem authority is portable rather than a wrapper flag. Each turn asks
+//! for a [`FilesystemAuthority`], while [`CodexService`] enforces a host-owned
+//! [`AuthorityPolicy`] immediately before launch. The default is read-only.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -18,13 +22,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-pub use codex_wrapper::SandboxMode;
 use codex_wrapper::command::exec::ExecResumeCommand;
-use codex_wrapper::{Codex, ExecCommand, QueryResult};
+use codex_wrapper::{Codex, ExecCommand, QueryResult, SandboxMode};
 use tower::Service;
 use tower_agent::{
-    AgentError, AgentEvent, AgentRequest, CancellationToken, EffectState, ErrorKind, FailurePhase,
-    SessionHandle, TokenUsage, Turn, TurnOutcome,
+    AgentError, AgentEvent, AgentRequest, AuthorityPolicy, CancellationToken, EffectState,
+    ErrorKind, FailurePhase, FilesystemAuthority, RequestsFilesystemAuthority, SessionHandle,
+    TokenUsage, Turn, TurnOutcome,
 };
 
 const PROVIDER: &str = "codex";
@@ -44,10 +48,18 @@ pub struct CodexOptions {
     /// `codex-wrapper` cannot apply these to `exec resume`, so resumed turns
     /// carrying any extra directory are rejected.
     pub additional_directories: Vec<PathBuf>,
-    /// Explicit sandbox mode. When absent, fresh and resumed turns use
-    /// [`SandboxMode::ReadOnly`]. Resumed turns enforce it through a Codex
-    /// configuration override because their command has no `--sandbox` flag.
-    pub sandbox: Option<SandboxMode>,
+    /// Portable filesystem authority requested for this turn.
+    pub filesystem_authority: FilesystemAuthority,
+}
+
+impl RequestsFilesystemAuthority for CodexOptions {
+    fn filesystem_authority(&self) -> FilesystemAuthority {
+        self.filesystem_authority
+    }
+
+    fn additional_filesystem_roots(&self) -> &[PathBuf] {
+        &self.additional_directories
+    }
 }
 
 /// A cloneable Tower service that runs one finite Codex turn per call.
@@ -56,6 +68,7 @@ pub struct CodexService {
     binary: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     termination_grace: Option<Duration>,
+    authority_policy: AuthorityPolicy,
 }
 
 impl CodexService {
@@ -65,6 +78,7 @@ impl CodexService {
             binary: None,
             codex_home: None,
             termination_grace: None,
+            authority_policy: AuthorityPolicy::read_only(),
         }
     }
 
@@ -85,6 +99,18 @@ impl CodexService {
     pub fn with_termination_grace(mut self, duration: Duration) -> Self {
         self.termination_grace = Some(duration);
         self
+    }
+
+    /// Set the host-owned filesystem ceiling enforced immediately before
+    /// provider launch. The default permits read-only turns without explicit
+    /// writable roots.
+    pub fn with_authority_policy(mut self, policy: AuthorityPolicy) -> Self {
+        self.authority_policy = policy;
+        self
+    }
+
+    pub const fn authority_policy(&self) -> &AuthorityPolicy {
+        &self.authority_policy
     }
 
     pub fn codex_home(&self) -> Option<&Path> {
@@ -136,7 +162,7 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
     fn call(&mut self, request: AgentRequest<Turn<CodexOptions>>) -> Self::Future {
         let service = self.clone();
         let observer = request.context.events().clone();
-        let prepared = prepare(request);
+        let prepared = prepare(request, &self.authority_policy);
 
         Box::pin(async move {
             let (turn, cancellation) = prepared?;
@@ -181,11 +207,12 @@ struct PreparedTurn {
     session: Option<String>,
     model: Option<String>,
     additional_directories: Vec<String>,
-    sandbox: Option<SandboxMode>,
+    filesystem_authority: FilesystemAuthority,
 }
 
 fn prepare(
     request: AgentRequest<Turn<CodexOptions>>,
+    authority_policy: &AuthorityPolicy,
 ) -> Result<(PreparedTurn, CancellationToken), AgentError> {
     let cancellation = request.context.cancellation().clone();
     if cancellation.is_cancelled() {
@@ -193,6 +220,7 @@ fn prepare(
     }
 
     let turn = request.body;
+    authority_policy.authorize(&turn)?;
     if turn.prompt.trim().is_empty() {
         return Err(AgentError::invalid_request("prompt must not be empty"));
     }
@@ -244,7 +272,7 @@ fn prepare(
             session,
             model: turn.options.model,
             additional_directories,
-            sandbox: turn.options.sandbox,
+            filesystem_authority: turn.options.filesystem_authority,
         },
         cancellation,
     ))
@@ -261,7 +289,7 @@ fn compose_prompt(prompt: &str, system_prompt: Option<&str>) -> String {
 
 fn fresh_command(turn: &PreparedTurn) -> ExecCommand {
     let mut command = ExecCommand::from_stdin(turn.prompt.clone())
-        .sandbox(turn.sandbox.unwrap_or(SandboxMode::ReadOnly))
+        .sandbox(sandbox_mode(turn.filesystem_authority))
         .skip_git_repo_check();
     if let Some(model) = &turn.model {
         command = command.model(model);
@@ -275,9 +303,7 @@ fn fresh_command(turn: &PreparedTurn) -> ExecCommand {
 fn resume_command(turn: &PreparedTurn, session: &str) -> ExecResumeCommand {
     let mut command = ExecResumeCommand::from_stdin(turn.prompt.clone())
         .session_id(session)
-        .config(sandbox_config(
-            turn.sandbox.unwrap_or(SandboxMode::ReadOnly),
-        ))
+        .config(sandbox_config(turn.filesystem_authority))
         .skip_git_repo_check();
     if let Some(model) = &turn.model {
         command = command.model(model);
@@ -285,11 +311,19 @@ fn resume_command(turn: &PreparedTurn, session: &str) -> ExecResumeCommand {
     command
 }
 
-fn sandbox_config(sandbox: SandboxMode) -> &'static str {
-    match sandbox {
-        SandboxMode::ReadOnly => "sandbox_mode=\"read-only\"",
-        SandboxMode::WorkspaceWrite => "sandbox_mode=\"workspace-write\"",
-        SandboxMode::DangerFullAccess => "sandbox_mode=\"danger-full-access\"",
+fn sandbox_mode(authority: FilesystemAuthority) -> SandboxMode {
+    match authority {
+        FilesystemAuthority::ReadOnly => SandboxMode::ReadOnly,
+        FilesystemAuthority::WorkspaceWrite => SandboxMode::WorkspaceWrite,
+        FilesystemAuthority::FullAccess => SandboxMode::DangerFullAccess,
+    }
+}
+
+fn sandbox_config(authority: FilesystemAuthority) -> &'static str {
+    match authority {
+        FilesystemAuthority::ReadOnly => "sandbox_mode=\"read-only\"",
+        FilesystemAuthority::WorkspaceWrite => "sandbox_mode=\"workspace-write\"",
+        FilesystemAuthority::FullAccess => "sandbox_mode=\"danger-full-access\"",
     }
 }
 
@@ -417,9 +451,10 @@ mod tests {
             system_prompt: Some("you are a helper".into()),
             model: Some("gpt-test".into()),
             additional_directories: vec![PathBuf::from("/work/extra")],
-            sandbox: None,
+            filesystem_authority: FilesystemAuthority::ReadOnly,
         };
-        let (prepared, _) = prepare(request("do it", options)).expect("valid turn");
+        let (prepared, _) =
+            prepare(request("do it", options), &AuthorityPolicy::read_only()).expect("valid turn");
         let args = fresh_command(&prepared).args();
 
         assert!(
@@ -433,6 +468,28 @@ mod tests {
         );
         assert_eq!(args.last().map(String::as_str), Some("-"));
         assert!(!args.iter().any(|arg| arg.contains("do it")));
+    }
+
+    #[test]
+    fn authorized_workspace_write_maps_to_the_provider_sandbox() {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let policy = AuthorityPolicy::new(FilesystemAuthority::WorkspaceWrite)
+            .allow_writable_root(&crate_root)
+            .expect("crate root exists");
+        let options = CodexOptions {
+            filesystem_authority: FilesystemAuthority::WorkspaceWrite,
+            ..Default::default()
+        };
+        let turn = Turn::new("edit")
+            .with_options(options)
+            .in_directory(&crate_root);
+        let (prepared, _) = prepare(AgentRequest::new(turn), &policy).expect("authorized turn");
+        let args = fresh_command(&prepared).args();
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--sandbox", "workspace-write"])
+        );
     }
 
     #[tokio::test]
@@ -496,7 +553,7 @@ mod tests {
             session: Some("thread-1".into()),
             model: None,
             additional_directories: Vec::new(),
-            sandbox: None,
+            filesystem_authority: FilesystemAuthority::ReadOnly,
         };
         let args = resume_command(&turn, "thread-1").args();
 
@@ -506,6 +563,23 @@ mod tests {
         );
         assert_eq!(args.last().map(String::as_str), Some("-"));
         assert!(!args.iter().any(|arg| arg.contains("continue")));
+    }
+
+    #[tokio::test]
+    async fn provider_launch_ceiling_cannot_be_bypassed_by_omitting_middleware() {
+        let options = CodexOptions {
+            filesystem_authority: FilesystemAuthority::WorkspaceWrite,
+            ..Default::default()
+        };
+
+        let error = CodexService::new()
+            .oneshot(request("write a file", options))
+            .await
+            .expect_err("the provider's default ceiling must remain read-only");
+
+        assert_eq!(error.kind, ErrorKind::Unauthorized);
+        assert_eq!(error.phase, FailurePhase::Validation);
+        assert_eq!(error.effects, EffectState::None);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod admission;
+mod authority;
 mod catch_panic;
 mod deadline;
 mod observe;
@@ -6,6 +7,7 @@ mod supervise;
 mod validate;
 
 pub use admission::{Admission, AdmissionLayer};
+pub use authority::{AuthorityLayer, EnforceAuthority};
 pub use catch_panic::{CatchPanic, CatchPanicLayer};
 pub use deadline::{Deadline, DeadlineLayer};
 pub use observe::{
