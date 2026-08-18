@@ -96,10 +96,10 @@ Ordering is semantic. Supervision owns the call after caller drop. Panic
 normalization sits inside observation so receipts see typed terminal failure.
 Admission wraps deadline handling so capacity stays occupied through cleanup.
 
-The next useful middleware seams are authority narrowing, deterministic context
-assembly, budget reservation and reconciliation, output-contract validation,
-event redaction and fanout, and circuit breaking. Retry, fallback, buffering,
-caching, and coalescing require stronger effect guarantees before they are safe.
+The next useful middleware seams are deterministic context assembly, budget
+reservation and reconciliation, output-contract validation, event redaction
+and fanout, and circuit breaking. Retry, fallback, buffering, caching, and
+coalescing require stronger effect guarantees before they are safe.
 
 ## Provider services
 
@@ -121,6 +121,15 @@ cargo run -p agent-example -- --provider codex "inspect this repository"
 
 Codex defaults to a read-only sandbox. `--workspace-write` is an explicit host
 choice and is refused for providers that cannot enforce that exact request.
+`AuthorityPolicy` is host-owned: `AuthorityLayer` rejects excessive requests
+before provider work, and `CodexService` repeats the check at launch so layer
+omission or ordering cannot broaden authority. Explicit writable roots must be
+approved by the policy. Full filesystem access requires an explicit full-access
+ceiling and is never enabled by default.
+
+Claude tool allowlists remain provider-specific controls, not a portable
+filesystem sandbox. The Claude service therefore does not claim conformance to
+the filesystem-authority contract.
 
 The [transport example](crates/tower-agent/examples/tower_mcp_prompt.rs) shows an
 MCP adapter as downstream composition over the same typed service.

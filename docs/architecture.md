@@ -89,16 +89,15 @@ The request cancellation token is cooperative at the kernel boundary. Provider
 services must observe it while work is in flight. `DeadlineLayer` never drops
 the provider future itself: it signals cancellation and waits for settlement.
 
-Claude wrapper 0.14 and Codex wrapper 0.3 put each invocation in its own process
-group on Unix. Dropping their execution future kills that group; timeout and
-stdin setup failures use the same ownership machinery. On platforms without
-process groups, cleanup reaches the direct child.
-
-Drop cannot synchronously wait for process reaping. The current adapters can
-prove that cancellation reaches the wrapper cleanup path and that the service
-settles promptly, but not a portable "all descendants reaped before return"
-property. A future wrapper API that accepts cancellation in its high-level JSON
-and stdin paths can close that final proof by awaiting termination and reap.
+Claude wrapper 0.14.2 and Codex wrapper 0.4.1 put each invocation in its own
+process group on Unix. The adapters pass request cancellation into the wrappers'
+high-level JSON paths. Explicit cancellation, timeout, and stdin failures await
+group termination and direct-child reaping before returning terminal settlement.
+On platforms without process groups, cleanup awaits the direct child but cannot
+guarantee ownership of descendants. Dropping a wrapper future remains an
+immediate kill path because destructors cannot await; `SuperviseLayer` retains
+provider work after caller drop so normal Tower composition reaches the awaited
+settlement path.
 
 ## Provider boundaries
 
@@ -120,17 +119,26 @@ provider-private launch context.
 
 ## Middleware opportunities
 
-### Authority narrowing
+### Filesystem authority
 
-Represent requested filesystem, network, tool, and subprocess authority and
-intersect it with host policy before provider launch. The result must never be
-broader than either request or policy. A provider that cannot enforce the
-intersection must refuse it. Approval is a host concern above the enforcement
-boundary.
+`FilesystemAuthority` represents read-only, workspace-write, and full-access
+requests without leaking provider wrapper flags into portable request DTOs.
+`AuthorityPolicy` supplies the host ceiling and approved writable roots.
+`AuthorityLayer` rejects excessive authority before provider work, while the
+Codex provider repeats the policy check at its launch boundary so middleware
+ordering or omission cannot bypass it. Requests are refused rather than silently
+narrowed because changing write semantics can change task behavior.
 
-The immediate concrete case is Codex read-only versus workspace-write sandbox.
-Claude does not currently expose an equivalent filesystem sandbox through this
-adapter, so a generic write request cannot yet be enforced uniformly.
+Codex maps the authorized portable level to its concrete sandbox. Read-only is
+the default ceiling; workspace-write requires explicit host policy and explicit
+request roots must remain beneath host-approved roots. Full access is never
+path-contained and therefore requires an explicit full-access ceiling.
+
+Claude does not expose an equivalent filesystem sandbox through this adapter.
+Its tool patterns and extra directories remain provider-specific controls and
+must not be presented as enforcement of the portable filesystem contract.
+Network, tool, subprocess, and interactive approval policy should be added only
+when concrete provider mechanisms can enforce their semantics.
 
 ### Context assembly
 

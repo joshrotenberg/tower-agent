@@ -6,11 +6,15 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use tower::{ServiceBuilder, ServiceExt};
 use tower_agent::layer::{
-    AdmissionLayer, CatchPanicLayer, DeadlineLayer, SuperviseLayer, ValidateTurnLayer,
+    AdmissionLayer, AuthorityLayer, CatchPanicLayer, DeadlineLayer, SuperviseLayer,
+    ValidateTurnLayer,
 };
-use tower_agent::{AgentRequest, CallContext, CancellationToken, SessionHandle, Turn, TurnOutcome};
+use tower_agent::{
+    AgentRequest, AuthorityPolicy, CallContext, CancellationToken, FilesystemAuthority,
+    SessionHandle, Turn, TurnOutcome,
+};
 use tower_agent_claude::{ClaudeOptions, ClaudeService};
-use tower_agent_codex::{CodexOptions, CodexService, SandboxMode};
+use tower_agent_codex::{CodexOptions, CodexService};
 
 #[derive(Parser)]
 #[command(name = "agent", about = "run one finite agent turn")]
@@ -105,14 +109,39 @@ async fn run_codex(
     cli: &Cli,
     context: CallContext,
 ) -> Result<TurnOutcome, tower_agent::AgentError> {
+    let authority = if cli.workspace_write {
+        FilesystemAuthority::WorkspaceWrite
+    } else {
+        FilesystemAuthority::ReadOnly
+    };
+    let mut policy = AuthorityPolicy::new(authority);
+    if authority == FilesystemAuthority::WorkspaceWrite {
+        if let Some(directory) = &cli.working_directory {
+            policy = policy.allow_writable_root(directory).map_err(|error| {
+                tower_agent::AgentError::invalid_request(format!(
+                    "working directory cannot be authorized: {error}"
+                ))
+            })?;
+        }
+        for directory in &cli.additional_directories {
+            policy = policy.allow_writable_root(directory).map_err(|error| {
+                tower_agent::AgentError::invalid_request(format!(
+                    "additional directory cannot be authorized: {error}"
+                ))
+            })?;
+        }
+    }
     let options = CodexOptions {
         model: cli.model.clone(),
         additional_directories: cli.additional_directories.clone(),
-        sandbox: cli.workspace_write.then_some(SandboxMode::WorkspaceWrite),
+        filesystem_authority: authority,
         ..CodexOptions::default()
     };
     let request = AgentRequest::with_context(turn(cli, options), context);
-    stack(CodexService::new()).oneshot(request).await
+    let provider = ServiceBuilder::new()
+        .layer(AuthorityLayer::new(policy.clone()))
+        .service(CodexService::new().with_authority_policy(policy));
+    stack(provider).oneshot(request).await
 }
 
 fn turn<O>(cli: &Cli, options: O) -> Turn<O> {
