@@ -48,3 +48,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --locked --no-deps
+
+      - name: Assemble publishable crates
+        run: >-
+          cargo package
+          -p tower-agent
+          -p tower-agent-claude
+          -p tower-agent-codex
+          --allow-dirty --locked --no-verify
