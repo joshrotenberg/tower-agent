@@ -31,16 +31,26 @@ use tower_agent::{
 const PROVIDER: &str = "claude";
 
 /// Provider-specific controls for one Claude Code turn.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClaudeOptions {
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
     pub model: Option<String>,
+    /// Model to fall back to when the primary model is overloaded.
+    pub fallback_model: Option<String>,
     pub effort: Option<ClaudeEffort>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
     pub additional_directories: Vec<PathBuf>,
     pub max_turns: Option<u32>,
+    /// CLI-side spend ceiling for the turn, in USD. Exceeding it surfaces
+    /// as a typed budget failure with resume and spend evidence.
+    pub max_budget_usd: Option<f64>,
+    /// Permission posture for the turn. Bypass-all is deliberately not
+    /// representable here; this adapter does not expose that control.
+    pub permission_mode: Option<ClaudePermissionMode>,
+    /// JSON Schema the terminal result must validate against.
+    pub json_schema: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +66,38 @@ impl From<ClaudeEffort> for Effort {
             ClaudeEffort::Low => Self::Low,
             ClaudeEffort::Medium => Self::Medium,
             ClaudeEffort::High => Self::High,
+        }
+    }
+}
+
+/// Permission posture for one turn, mapping to `--permission-mode`.
+///
+/// The wrapper's bypass-all mode is intentionally absent: it stays behind
+/// `claude_wrapper::dangerous::DangerousClient`, and this adapter does not
+/// expose it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClaudePermissionMode {
+    /// Default interactive permissions (headless calls deny on prompt).
+    #[default]
+    Default,
+    /// Auto-accept file edits.
+    AcceptEdits,
+    /// Deny anything that would ask.
+    DontAsk,
+    /// Plan mode (read-only).
+    Plan,
+    /// Auto mode.
+    Auto,
+}
+
+impl From<ClaudePermissionMode> for claude_wrapper::PermissionMode {
+    fn from(value: ClaudePermissionMode) -> Self {
+        match value {
+            ClaudePermissionMode::Default => Self::Default,
+            ClaudePermissionMode::AcceptEdits => Self::AcceptEdits,
+            ClaudePermissionMode::DontAsk => Self::DontAsk,
+            ClaudePermissionMode::Plan => Self::Plan,
+            ClaudePermissionMode::Auto => Self::Auto,
         }
     }
 }
@@ -229,6 +271,32 @@ fn build_query(turn: &Turn<ClaudeOptions>) -> Result<QueryCommand, AgentError> {
             "Claude tool patterns must not be empty",
         ));
     }
+    if options
+        .max_budget_usd
+        .is_some_and(|budget| !budget.is_finite() || budget <= 0.0)
+    {
+        return Err(AgentError::invalid_request(
+            "Claude budget must be a positive amount",
+        ));
+    }
+    if options
+        .fallback_model
+        .as_ref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        return Err(AgentError::invalid_request(
+            "Claude fallback model must not be empty",
+        ));
+    }
+    if options
+        .json_schema
+        .as_ref()
+        .is_some_and(|schema| schema.trim().is_empty())
+    {
+        return Err(AgentError::invalid_request(
+            "Claude JSON schema must not be empty",
+        ));
+    }
 
     let mut command = QueryCommand::new(turn.prompt.clone());
     if let Some(prompt) = &options.system_prompt {
@@ -240,8 +308,20 @@ fn build_query(turn: &Turn<ClaudeOptions>) -> Result<QueryCommand, AgentError> {
     if let Some(model) = &options.model {
         command = command.model(model);
     }
+    if let Some(model) = &options.fallback_model {
+        command = command.fallback_model(model);
+    }
     if let Some(effort) = options.effort {
         command = command.effort(effort.into());
+    }
+    if let Some(budget) = options.max_budget_usd {
+        command = command.max_budget_usd(budget);
+    }
+    if let Some(mode) = options.permission_mode {
+        command = command.permission_mode(mode.into());
+    }
+    if let Some(schema) = &options.json_schema {
+        command = command.json_schema(schema);
     }
     if let Some(session) = &turn.session {
         command = command.resume(session.value());
@@ -543,11 +623,15 @@ mod tests {
             system_prompt: Some("You are the tester.".into()),
             append_system_prompt: Some("Be brief.".into()),
             model: Some("haiku".into()),
+            fallback_model: Some("sonnet".into()),
             effort: Some(ClaudeEffort::High),
             allowed_tools: vec!["Bash(cargo test:*)".into()],
             disallowed_tools: vec!["Bash(rm:*)".into()],
             additional_directories: vec![PathBuf::from("/shared")],
             max_turns: Some(4),
+            max_budget_usd: Some(2.5),
+            permission_mode: Some(ClaudePermissionMode::Plan),
+            json_schema: Some(r#"{"type":"object"}"#.into()),
         };
         let turn = Turn::new("run the tests")
             .resume(SessionHandle::new(PROVIDER, "sess-123"))
@@ -557,11 +641,47 @@ mod tests {
             .expect("valid query")
             .to_command_string(&fake_claude());
         assert!(!rendered.contains("run the tests"));
-        for expected in ["You are the tester.", "haiku", "/shared", "sess-123"] {
+        for expected in [
+            "You are the tester.",
+            "haiku",
+            "sonnet",
+            "/shared",
+            "sess-123",
+            "2.5",
+            "plan",
+            "type",
+        ] {
             assert!(
                 rendered.contains(expected),
                 "missing {expected:?}: {rendered}"
             );
+        }
+        assert!(!rendered.contains("bypass"));
+    }
+
+    #[test]
+    fn budget_and_schema_are_validated_before_launch() {
+        for options in [
+            ClaudeOptions {
+                max_budget_usd: Some(0.0),
+                ..ClaudeOptions::default()
+            },
+            ClaudeOptions {
+                max_budget_usd: Some(f64::NAN),
+                ..ClaudeOptions::default()
+            },
+            ClaudeOptions {
+                json_schema: Some("   ".into()),
+                ..ClaudeOptions::default()
+            },
+            ClaudeOptions {
+                fallback_model: Some("".into()),
+                ..ClaudeOptions::default()
+            },
+        ] {
+            let turn = Turn::new("hello").with_options(options);
+            let error = build_query(&turn).expect_err("invalid options must be refused");
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
         }
     }
 
