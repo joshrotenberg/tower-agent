@@ -51,6 +51,12 @@ pub struct ClaudeOptions {
     pub permission_mode: Option<ClaudePermissionMode>,
     /// JSON Schema the terminal result must validate against.
     pub json_schema: Option<String>,
+    /// When true, the CLI ignores all configured MCP servers (user scope
+    /// and any project .mcp.json at the working directory) and boots none.
+    /// Hosts that queue turns from inside a project directory want this:
+    /// a project .mcp.json that registers the host itself would otherwise
+    /// make every turn boot a nested host instance as an MCP server.
+    pub strict_mcp_config: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +348,10 @@ fn build_query(turn: &Turn<ClaudeOptions>) -> Result<QueryCommand, AgentError> {
         command = command.add_dir(directory);
     }
 
+    if options.strict_mcp_config {
+        command = command.strict_mcp_config();
+    }
+
     Ok(command.prompt_via_stdin(true))
 }
 
@@ -629,6 +639,43 @@ fn map_other_wrapper_error(error: claude_wrapper::Error) -> AgentError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn strict_mcp_config_reaches_the_cli_argv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-strict-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "case \" $* \" in *\" --strict-mcp-config \"*) ;; *) exit 93;; esac\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"s\",\"total_cost_usd\":0.01,\"duration_ms\":1,\"num_turns\":1,\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"is_error\":false}'\n",
+            ),
+        )
+        .expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let options = ClaudeOptions {
+            strict_mcp_config: true,
+            ..ClaudeOptions::default()
+        };
+        let request = AgentRequest::new(Turn::new("hello").with_options(options));
+        let outcome = ClaudeService::new()
+            .with_binary(&path)
+            .oneshot(request)
+            .await
+            .expect("strict flag present, fake run succeeds");
+        let _ = std::fs::remove_file(path);
+        assert_eq!(outcome.output, "ok");
+    }
+
     use tower::ServiceExt;
     use tower_agent::{CallContext, CancellationToken, EventObserver};
 
@@ -653,6 +700,7 @@ mod tests {
             max_budget_usd: Some(2.5),
             permission_mode: Some(ClaudePermissionMode::Plan),
             json_schema: Some(r#"{"type":"object"}"#.into()),
+            strict_mcp_config: true,
         };
         let turn = Turn::new("run the tests")
             .resume(SessionHandle::new(PROVIDER, "sess-123"))
@@ -671,6 +719,7 @@ mod tests {
             "2.5",
             "plan",
             "type",
+            "--strict-mcp-config",
         ] {
             assert!(
                 rendered.contains(expected),
