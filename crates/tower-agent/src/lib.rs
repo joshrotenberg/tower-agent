@@ -18,7 +18,7 @@ mod session;
 pub use authority::{AuthorityPolicy, FilesystemAuthority, RequestsFilesystemAuthority};
 pub use error::{AgentError, EffectState, ErrorKind, FailurePhase};
 pub use event::{AgentEvent, EventObserver, EventSendError, EventSink};
-pub use fake::EchoService;
+pub use fake::{EchoService, FakeOptions, FakeService};
 pub use request::{AgentRequest, CallContext, OperationId, Turn};
 pub use response::{Cost, FailureEvidence, TokenUsage, TurnOutcome};
 pub use service::{BoxTurnService, TurnRequest};
