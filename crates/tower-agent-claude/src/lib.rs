@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use claude_wrapper::types::QueryResult;
-use claude_wrapper::{Claude, Effort, QueryCommand};
+use claude_wrapper::{Claude, Effort, HermeticScope, QueryCommand};
 use tower::Service;
 use tower_agent::{
     AgentError, AgentEvent, AgentRequest, Cost, EffectState, ErrorKind, FailureEvidence,
@@ -57,6 +57,20 @@ pub struct ClaudeOptions {
     /// a project .mcp.json that registers the host itself would otherwise
     /// make every turn boot a nested host instance as an MCP server.
     pub strict_mcp_config: bool,
+    /// Ambient-context seal for the turn. Full drops every setting source
+    /// (user, project, local): no ambient CLAUDE.md, skills, or agents
+    /// leak in, and MCP is sealed too. Project keeps only the user's
+    /// global scope. None leaves the CLI's normal ambient loading.
+    pub hermetic: Option<ClaudeHermetic>,
+}
+
+/// Ambient-context seal scope, mirroring the wrapper's HermeticScope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaudeHermetic {
+    /// Drop user, project, and local setting sources.
+    Full,
+    /// Keep only the user's global scope; seal project and local.
+    Project,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,6 +364,12 @@ fn build_query(turn: &Turn<ClaudeOptions>) -> Result<QueryCommand, AgentError> {
 
     if options.strict_mcp_config {
         command = command.strict_mcp_config();
+    }
+    if let Some(hermetic) = options.hermetic {
+        command = command.hermetic_scoped(match hermetic {
+            ClaudeHermetic::Full => HermeticScope::Full,
+            ClaudeHermetic::Project => HermeticScope::Project,
+        });
     }
 
     Ok(command.prompt_via_stdin(true))
@@ -701,6 +721,7 @@ mod tests {
             permission_mode: Some(ClaudePermissionMode::Plan),
             json_schema: Some(r#"{"type":"object"}"#.into()),
             strict_mcp_config: true,
+            hermetic: Some(ClaudeHermetic::Full),
         };
         let turn = Turn::new("run the tests")
             .resume(SessionHandle::new(PROVIDER, "sess-123"))
@@ -720,6 +741,7 @@ mod tests {
             "plan",
             "type",
             "--strict-mcp-config",
+            "--setting-sources",
         ] {
             assert!(
                 rendered.contains(expected),
