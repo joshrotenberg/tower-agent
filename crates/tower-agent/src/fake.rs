@@ -170,7 +170,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{CallContext, CancellationToken, ErrorKind, EventObserver};
+    use crate::{CallContext, CancellationToken, ErrorKind};
 
     #[tokio::test]
     async fn fake_echoes_with_a_minted_session_and_duration() {
