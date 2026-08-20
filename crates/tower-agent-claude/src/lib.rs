@@ -410,6 +410,25 @@ fn query_evidence(result: &QueryResult) -> FailureEvidence {
     }
 }
 
+/// Bounded stderr tail so a terminal failure explains itself without
+/// carrying unbounded provider output.
+fn command_failed_message(provider: &str, exit_code: i32, stderr: &str) -> String {
+    let tail: String = stderr
+        .trim()
+        .chars()
+        .rev()
+        .take(400)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if tail.is_empty() {
+        format!("{provider} command failed with exit code {exit_code}")
+    } else {
+        format!("{provider} command failed with exit code {exit_code}: {tail}")
+    }
+}
+
 fn cancelled_before_launch() -> AgentError {
     AgentError::new(
         ErrorKind::Cancelled,
@@ -590,9 +609,11 @@ fn map_other_wrapper_error(error: claude_wrapper::Error) -> AgentError {
             FailurePhase::Settlement,
             EffectState::Possible,
         ),
-        Error::CommandFailed { exit_code, .. } => (
+        Error::CommandFailed {
+            exit_code, stderr, ..
+        } => (
             ErrorKind::Provider,
-            format!("Claude command failed with exit code {exit_code}"),
+            command_failed_message("Claude", exit_code, &stderr),
             FailurePhase::Running,
             EffectState::Possible,
         ),
