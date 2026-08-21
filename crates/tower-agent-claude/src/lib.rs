@@ -615,7 +615,7 @@ async fn run(
             FailurePhase::Settlement,
             EffectState::Possible,
         )
-        .with_evidence(query_evidence(&result, Some(session))));
+        .with_evidence(query_evidence_without_session(&result)));
     }
     if result.is_error {
         return Err(map_query_error(&result, preassigned_session.as_ref()));
@@ -671,6 +671,12 @@ fn query_evidence(
         duration: result.duration_ms.map(Duration::from_millis),
         provider_turns: result.num_turns,
     }
+}
+
+fn query_evidence_without_session(result: &QueryResult) -> FailureEvidence {
+    let mut evidence = query_evidence(result, None);
+    evidence.session = None;
+    evidence
 }
 
 /// Bounded stderr tail so a terminal failure explains itself without
@@ -1098,6 +1104,7 @@ mod tests {
     use super::*;
 
     const PREASSIGNED_SESSION: &str = "a1111111-1111-4111-8111-111111111111";
+    const MISMATCHED_SESSION: &str = "b2222222-2222-4222-8222-222222222222";
 
     fn preassigned_context() -> CallContext {
         CallContext::new()
@@ -1400,11 +1407,13 @@ mod tests {
                 "prompt=$(cat)\n",
                 "if [ \"$prompt\" = failure ]; then\n",
                 "  printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"result\":\"stopped\",\"is_error\":true}}'\n",
+                "elif [ \"$prompt\" = mismatch ]; then\n",
+                "  printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"wrong session\",\"session_id\":\"{}\",\"total_cost_usd\":0.5,\"duration_ms\":12,\"is_error\":false}}'\n",
                 "else\n",
                 "  printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"{}\",\"is_error\":false}}'\n",
                 "fi\n",
             ),
-            PREASSIGNED_SESSION, PREASSIGNED_SESSION
+            PREASSIGNED_SESSION, MISMATCHED_SESSION, PREASSIGNED_SESSION
         );
         std::fs::write(&path, script).expect("write fake Claude CLI");
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -1426,13 +1435,13 @@ mod tests {
         );
 
         let error = service
+            .clone()
             .oneshot(AgentRequest::with_context(
                 Turn::new("failure").with_options(ClaudeOptions::default()),
                 preassigned_context(),
             ))
             .await
             .expect_err("result-shaped failure remains an error");
-        let _ = std::fs::remove_file(path);
         assert_eq!(
             error
                 .evidence
@@ -1441,6 +1450,23 @@ mod tests {
                 .map(SessionHandle::value),
             Some(PREASSIGNED_SESSION)
         );
+
+        let mismatch = service
+            .oneshot(AgentRequest::with_context(
+                Turn::new("mismatch").with_options(ClaudeOptions::default()),
+                preassigned_context(),
+            ))
+            .await
+            .expect_err("preassigned session mismatch must fail settlement");
+        let _ = std::fs::remove_file(path);
+        assert_eq!(mismatch.phase, FailurePhase::Settlement);
+        assert_eq!(mismatch.effects, EffectState::Possible);
+        let evidence = mismatch.evidence.as_deref().expect("accounting evidence");
+        assert_eq!(evidence.session, None);
+        assert_eq!(evidence.cost, Some(Cost::usd(0.5)));
+        assert_eq!(evidence.duration, Some(Duration::from_millis(12)));
+        assert!(!format!("{mismatch:?}").contains(PREASSIGNED_SESSION));
+        assert!(!format!("{mismatch:?}").contains(MISMATCHED_SESSION));
     }
 
     #[cfg(unix)]

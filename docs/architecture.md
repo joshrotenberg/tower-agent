@@ -158,12 +158,14 @@ Claude accepts this control for fresh turns because its CLI can honor a
 specific `--session-id`. The adapter requires a Claude-tagged canonical
 lowercase UUID and rejects any combination with `Turn::resume` before launch.
 Success, result-shaped failure, cancellation, process failure, and launch
-failure all retain the same assigned handle as terminal evidence. If Claude
-reports a different session, settlement fails instead of silently adopting it.
+failure all retain the same assigned handle as terminal evidence.
 Provider-generated fresh IDs and caller-facing resume handles keep their
 existing paths when no host assignment is present. Providers without an exact
 fresh-session primitive must reject this context rather than pretend to honor
-it.
+it. If Claude reports a different session than the assignment, settlement
+fails instead of silently adopting it. The failure retains safe accounting
+evidence but omits session evidence entirely; neither disputed handle is
+advertised as a verified continuation.
 
 ### Child process environment
 
