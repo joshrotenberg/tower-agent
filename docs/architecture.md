@@ -280,6 +280,13 @@ Validate structured provider output before it becomes a successful outcome.
 Distinguish provider execution failure from settlement failure and retain the
 raw provider evidence only behind a host-private diagnostic boundary.
 
+The Codex adapter requires exactly one terminal event and requires it to be the
+last parsed event. Only `turn.completed` produces `TurnOutcome`; `turn.failed`
+becomes an effectful typed failure, including rollout-budget classification and
+validated session evidence. Missing, repeated, contradictory, or nonterminal
+terminal sequences fail settlement without promoting partial assistant text to
+successful output or advertising uncertain continuation evidence.
+
 ### Event policy
 
 Fan out events to metrics, logs, progress, and receipts while applying per-sink
