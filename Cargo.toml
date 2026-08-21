@@ -6,6 +6,7 @@ members = [
     "crates/tower-agent-codex",
     "crates/tower-agent-workflow",
     "examples/agent",
+    "examples/apalis-local",
 ]
 
 [workspace.package]
