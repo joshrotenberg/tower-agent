@@ -134,13 +134,65 @@ the filesystem-authority contract.
 The [transport example](crates/tower-agent/examples/tower_mcp_prompt.rs) shows an
 MCP adapter as downstream composition over the same typed service.
 
+## Workflow composition
+
+`tower-agent-workflow` is an experimental downstream library for composing more
+than one finite operation. Single shots, linear pipelines, and DAGs normalize to
+one validated workflow definition containing stable identities, dependencies,
+and opaque host-owned jobs. Its non-durable reference runner invokes one
+application-supplied Tower dispatcher, admits ready steps in stable id order as
+bounded capacity becomes available, and performs no implicit retry or dropping
+per-step timeout. Unrelated slow branches do not block newly ready work. A
+workflow-wide absolute deadline signals cancellation, prevents further calls
+once observed, and waits for already-called services to settle cooperatively.
+
+The workflow crate deliberately contains no TOML parser, provider configuration,
+MCP surface, task store, queue, session manager, or Apalis dependency. An
+application owns those policies and may translate its configuration into the
+library builder. `tower-agent` remains the independently usable one-operation
+primitive and has no dependency on the workflow crate.
+
+Run the typed fake fan-out/join example with:
+
+```text
+cargo run -p tower-agent-workflow --example fake_fanout
+```
+
+The [local Apalis example](examples/apalis-local/README.md) sends each ready step
+through an in-memory Apalis worker using only an opaque job reference. It
+deliberately delivers every job twice, drops the first coordinator, and replays
+the same logical run identity in the same process. The replay reuses its settled
+roots and schedules only the newly ready join, showing that the host
+claim/result record prevents duplicate provider execution:
+
+```text
+cargo run -p apalis-local-example
+```
+
+Its focused tests also prove that claimed work can be made retryable, fenced,
+and safely reclaimed, while work abandoned beyond the launch boundary settles
+as typed uncertainty and is never relaunched. The example notes document the
+state model and its explicit persistence and recovery non-goals:
+
+```text
+cargo test -p apalis-local-example
+```
+
+A future `tower-agent-apalis` crate should remain independent of graph
+semantics: a thin typed adapter from an opaque, versioned host job reference to
+one freshly prepared `AgentRequest` and an already-hardened provider service.
+It should add no automatic retry or dropping timeout, and Apalis acknowledgments
+should not replace the host's authoritative claim and terminal-result records.
+
 ## Workspace
 
 ```text
 crates/tower-agent          service types, fakes, and middleware
 crates/tower-agent-claude   Claude provider service
 crates/tower-agent-codex    Codex provider service
+crates/tower-agent-workflow experimental downstream workflow composition
 examples/agent              executable provider composition
+examples/apalis-local       in-memory Apalis transport proof with fake providers
 ```
 
 Run the complete check suite with:

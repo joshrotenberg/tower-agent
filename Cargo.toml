@@ -4,7 +4,9 @@ members = [
     "crates/tower-agent",
     "crates/tower-agent-claude",
     "crates/tower-agent-codex",
+    "crates/tower-agent-workflow",
     "examples/agent",
+    "examples/apalis-local",
 ]
 
 [workspace.package]
