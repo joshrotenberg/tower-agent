@@ -11,6 +11,7 @@ mod error;
 mod event;
 mod fake;
 pub mod layer;
+mod process;
 mod request;
 mod response;
 mod service;
@@ -21,6 +22,7 @@ pub use environment::{ChildEnvironmentError, ChildEnvironmentPolicy, ResolvedChi
 pub use error::{AgentError, EffectState, ErrorKind, FailurePhase};
 pub use event::{AgentEvent, EventObserver, EventSendError, EventSink};
 pub use fake::{EchoService, FakeOptions, FakeService};
+pub use process::{SpawnObserver, SpawnReceipt};
 pub use request::{AgentRequest, CallContext, OperationId, Turn};
 pub use response::{Cost, FailureEvidence, TokenUsage, TurnOutcome};
 pub use service::{BoxTurnService, TurnRequest};
