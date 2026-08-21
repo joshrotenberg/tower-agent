@@ -4,9 +4,6 @@ use thiserror::Error;
 
 use crate::{InvalidIdentifier, StepId, WorkflowId, WorkflowVersion};
 
-/// Schema version of the in-memory workflow definition contract.
-pub const WORKFLOW_SCHEMA_VERSION: u16 = 1;
-
 /// An authoring-time step whose identifiers are validated by a workflow builder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepSpec<J> {
@@ -16,6 +13,10 @@ pub struct StepSpec<J> {
 }
 
 impl<J> StepSpec<J> {
+    /// Construct an authoring-time step with no dependencies.
+    ///
+    /// The identifier is retained as text and validated when its workflow is
+    /// built. Use [`Self::needs`] to declare direct dependencies in a DAG.
     pub fn new(id: impl Into<String>, job: J) -> Self {
         Self {
             id: id.into(),
@@ -40,14 +41,17 @@ pub struct StepDefinition<J> {
 }
 
 impl<J> StepDefinition<J> {
+    /// Return the validated identity of this step.
     pub fn id(&self) -> &StepId {
         &self.id
     }
 
+    /// Return this step's direct dependencies in stable step-id order.
     pub fn needs(&self) -> &[StepId] {
         &self.needs
     }
 
+    /// Borrow the opaque host-owned job associated with this step.
     pub fn job(&self) -> &J {
         &self.job
     }
@@ -56,7 +60,6 @@ impl<J> StepDefinition<J> {
 /// A validated, normalized DAG with an opaque host-owned job at each step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowDefinition<J> {
-    schema_version: u16,
     id: WorkflowId,
     version: WorkflowVersion,
     steps: BTreeMap<StepId, StepDefinition<J>>,
@@ -76,30 +79,35 @@ impl<J> WorkflowDefinition<J> {
         compile(id.into(), version.into(), vec![step])
     }
 
-    pub const fn schema_version(&self) -> u16 {
-        self.schema_version
-    }
-
+    /// Return the stable workflow identity.
     pub fn id(&self) -> &WorkflowId {
         &self.id
     }
 
+    /// Return the host-defined version of this workflow.
     pub fn version(&self) -> &WorkflowVersion {
         &self.version
     }
 
+    /// Iterate over all normalized steps in stable step-id order.
     pub fn steps(&self) -> impl ExactSizeIterator<Item = &StepDefinition<J>> {
         self.steps.values()
     }
 
+    /// Find a normalized step by its validated identity.
     pub fn step(&self, id: &StepId) -> Option<&StepDefinition<J>> {
         self.steps.get(id)
     }
 
+    /// Return a stable topological ordering of all step identities.
+    ///
+    /// Independent ready steps are ordered by step id, so equivalent
+    /// definitions produce the same order regardless of authoring order.
     pub fn topological_order(&self) -> &[StepId] {
         &self.topological_order
     }
 
+    /// Return all steps without dependencies in stable step-id order.
     pub fn roots(&self) -> Vec<&StepDefinition<J>> {
         self.steps
             .values()
@@ -107,6 +115,7 @@ impl<J> WorkflowDefinition<J> {
             .collect()
     }
 
+    /// Return all steps without successors in stable step-id order.
     pub fn leaves(&self) -> Vec<&StepDefinition<J>> {
         let dependencies = self
             .steps
@@ -129,6 +138,7 @@ pub struct PipelineBuilder<J> {
 }
 
 impl<J> PipelineBuilder<J> {
+    /// Begin a linear workflow with the given stable identity and version.
     pub fn new(id: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -137,11 +147,16 @@ impl<J> PipelineBuilder<J> {
         }
     }
 
+    /// Append a step after the previously appended step.
+    ///
+    /// Pipeline dependencies are inferred during [`Self::build`], so the step
+    /// must not contain dependencies declared through [`StepSpec::needs`].
     pub fn then(mut self, step: StepSpec<J>) -> Self {
         self.steps.push(step);
         self
     }
 
+    /// Validate and normalize this linear workflow into a DAG definition.
     pub fn build(mut self) -> Result<WorkflowDefinition<J>, WorkflowDefinitionError> {
         let mut previous: Option<String> = None;
         for step in &mut self.steps {
@@ -166,6 +181,7 @@ pub struct DagBuilder<J> {
 }
 
 impl<J> DagBuilder<J> {
+    /// Begin a DAG workflow with the given stable identity and version.
     pub fn new(id: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -174,11 +190,13 @@ impl<J> DagBuilder<J> {
         }
     }
 
+    /// Add one authoring-time step to the DAG.
     pub fn step(mut self, step: StepSpec<J>) -> Self {
         self.steps.push(step);
         self
     }
 
+    /// Validate identities and dependencies and produce a normalized DAG.
     pub fn build(self) -> Result<WorkflowDefinition<J>, WorkflowDefinitionError> {
         compile(self.id, self.version, self.steps)
     }
@@ -279,7 +297,6 @@ fn compile<J>(
     }
 
     Ok(WorkflowDefinition {
-        schema_version: WORKFLOW_SCHEMA_VERSION,
         id,
         version,
         steps,
@@ -287,24 +304,47 @@ fn compile<J>(
     })
 }
 
+/// An authoring or validation error in a workflow definition.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum WorkflowDefinitionError {
+    /// A workflow, version, step, or dependency identifier is invalid.
     #[error(transparent)]
     InvalidIdentifier(#[from] InvalidIdentifier),
+    /// The workflow contains no steps.
     #[error("workflow must contain at least one step")]
     NoSteps,
+    /// A definition declared as a single shot contains a dependency.
     #[error("a single-step workflow cannot declare dependencies")]
     SingleStepHasDependencies,
+    /// A pipeline step declared an explicit dependency instead of using insertion order.
     #[error("pipeline step `{0}` cannot declare explicit dependencies")]
     PipelineStepHasDependencies(String),
+    /// More than one step uses the same validated identity.
     #[error("duplicate step id `{0}`")]
     DuplicateStep(StepId),
+    /// A step names the same direct dependency more than once.
     #[error("step `{step}` repeats dependency `{dependency}`")]
-    DuplicateDependency { step: StepId, dependency: StepId },
+    DuplicateDependency {
+        /// The step containing the repeated edge.
+        step: StepId,
+        /// The dependency named more than once.
+        dependency: StepId,
+    },
+    /// A step refers to a dependency that is absent from the definition.
     #[error("step `{step}` refers to missing dependency `{dependency}`")]
-    MissingDependency { step: StepId, dependency: StepId },
+    MissingDependency {
+        /// The step containing the unresolved edge.
+        step: StepId,
+        /// The dependency not present in the workflow.
+        dependency: StepId,
+    },
+    /// A step directly depends on itself.
     #[error("step `{0}` depends on itself")]
     SelfDependency(StepId),
+    /// At least one dependency cycle prevents a complete topological ordering.
+    ///
+    /// The contained identities are the steps left blocked by the cycle, not
+    /// necessarily a minimal cycle path.
     #[error("workflow contains a cycle involving {0:?}")]
     Cycle(Vec<StepId>),
 }

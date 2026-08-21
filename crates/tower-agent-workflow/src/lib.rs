@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! Experimental, backend-neutral workflows over finite Tower services.
 //!
 //! A [`WorkflowDefinition`] owns stable identities, dependency topology, and
@@ -19,8 +21,8 @@ mod id;
 
 pub use agent::AgentStepService;
 pub use definition::{
-    DagBuilder, PipelineBuilder, StepDefinition, StepSpec, WORKFLOW_SCHEMA_VERSION,
-    WorkflowDefinition, WorkflowDefinitionError,
+    DagBuilder, PipelineBuilder, StepDefinition, StepSpec, WorkflowDefinition,
+    WorkflowDefinitionError,
 };
 pub use execution::{
     BoxStepService, StepCall, StepFailure, WorkflowContext, WorkflowFailure, WorkflowOutcome,
