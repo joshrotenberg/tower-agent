@@ -154,6 +154,29 @@ the filesystem-authority contract.
 The [transport example](crates/tower-agent/examples/tower_mcp_prompt.rs) shows an
 MCP adapter as downstream composition over the same typed service.
 
+## Workflow composition
+
+`tower-agent-workflow` is an experimental downstream library for composing more
+than one finite operation. Single shots, linear pipelines, and DAGs normalize to
+one validated workflow definition containing stable identities, dependencies,
+and opaque host-owned jobs. Its non-durable reference runner invokes one
+application-supplied Tower dispatcher, admits ready steps in deterministic
+bounded waves, and performs no implicit retry or dropping per-step timeout. A
+workflow-wide absolute deadline signals cancellation, prevents further calls
+once observed, and waits for already-called services to settle cooperatively.
+
+The workflow crate deliberately contains no TOML parser, provider configuration,
+MCP surface, task store, queue, session manager, or Apalis dependency. An
+application owns those policies and may translate its configuration into the
+library builder. `tower-agent` remains the independently usable one-operation
+primitive and has no dependency on the workflow crate.
+
+A future `tower-agent-apalis` crate should remain independent of graph
+semantics: a thin typed adapter from an opaque, versioned host job reference to
+one freshly prepared `AgentRequest` and an already-hardened provider service.
+It should add no automatic retry or dropping timeout, and Apalis acknowledgments
+should not replace the host's authoritative claim and terminal-result records.
+
 ## Workspace
 
 ```text
@@ -161,6 +184,7 @@ crates/tower-agent          service types, fakes, and middleware
 crates/tower-agent-claude   Claude provider service
 crates/tower-agent-codex    Codex provider service
 crates/tower-agent-plan     planning vocabulary and layered resolver (unpublished)
+crates/tower-agent-workflow experimental downstream workflow composition
 examples/agent              executable provider composition
 ```
 

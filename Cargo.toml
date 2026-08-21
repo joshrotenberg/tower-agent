@@ -5,6 +5,7 @@ members = [
     "crates/tower-agent-claude",
     "crates/tower-agent-codex",
     "crates/tower-agent-plan",
+    "crates/tower-agent-workflow",
     "examples/agent",
 ]
 
