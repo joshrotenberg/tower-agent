@@ -24,7 +24,9 @@
 //! instructions, discovered skills, workspace contents, or the child
 //! environment. Ephemeral turns are a separate per-turn persistence choice.
 
+use std::fmt;
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -43,11 +45,14 @@ use tower_agent::{
 
 const PROVIDER: &str = "codex";
 
+/// Maximum serialized size accepted for a Codex output schema.
+pub const MAX_OUTPUT_SCHEMA_BYTES: usize = 1024 * 1024;
+
 /// Per-turn controls supported by the Codex provider service.
 ///
 /// Host-local launch configuration such as `CODEX_HOME` belongs on
 /// [`CodexService`], not in the portable turn body.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CodexOptions {
     /// Instructions prepended to the user prompt because `codex exec` has no
     /// separate system-prompt argument.
@@ -58,12 +63,35 @@ pub struct CodexOptions {
     /// `codex-wrapper` cannot apply these to `exec resume`, so resumed turns
     /// carrying any extra directory are rejected.
     pub additional_directories: Vec<PathBuf>,
+    /// JSON Schema for the provider's structured final response.
+    ///
+    /// The adapter validates this as Draft 2020-12, bounds its serialized
+    /// size, and materializes it in an owner-only temporary file. Callers do
+    /// not supply a local filesystem path.
+    pub output_schema: Option<serde_json::Value>,
     /// Portable filesystem authority requested for this turn.
     pub filesystem_authority: FilesystemAuthority,
     /// Do not persist this turn into resumable rollout history. Ephemeral
     /// outcomes deliberately omit a session handle even if the CLI reports a
     /// transient thread id.
     pub ephemeral: bool,
+}
+
+impl fmt::Debug for CodexOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CodexOptions")
+            .field("system_prompt", &self.system_prompt)
+            .field("model", &self.model)
+            .field("additional_directories", &self.additional_directories)
+            .field(
+                "output_schema",
+                &self.output_schema.as_ref().map(|_| "<redacted>"),
+            )
+            .field("filesystem_authority", &self.filesystem_authority)
+            .field("ephemeral", &self.ephemeral)
+            .finish()
+    }
 }
 
 impl RequestsFilesystemAuthority for CodexOptions {
@@ -295,19 +323,39 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
                 return Err(cancelled_before_launch());
             }
 
+            let output_schema_file = turn
+                .output_schema
+                .as_deref()
+                .map(|schema| materialize_output_schema(schema, operation_id))
+                .transpose()?;
+            let output_schema_path = output_schema_file
+                .as_ref()
+                .map(|file| {
+                    file.path().to_str().ok_or_else(|| {
+                        AgentError::new(
+                            ErrorKind::Internal,
+                            "Codex output schema temporary path is not valid UTF-8",
+                            FailurePhase::Launch,
+                            EffectState::None,
+                        )
+                    })
+                })
+                .transpose()?;
+
             let _ = observer.try_emit(AgentEvent::Started);
             let result = match &turn.session {
                 Some(session) => {
-                    resume_command(&turn, session, service.ambient_context)
+                    resume_command(&turn, session, service.ambient_context, output_schema_path)
                         .execute_json_cancellable(&codex, cancellation.cancelled())
                         .await
                 }
                 None => {
-                    fresh_command(&turn, service.ambient_context)
+                    fresh_command(&turn, service.ambient_context, output_schema_path)
                         .execute_json_cancellable(&codex, cancellation.cancelled())
                         .await
                 }
             };
+            drop(output_schema_file);
             let result = result.map_err(map_run_error)?;
 
             let outcome = adapt_outcome(result, turn.session, started.elapsed(), turn.ephemeral);
@@ -325,6 +373,7 @@ struct PreparedTurn {
     session: Option<String>,
     model: Option<String>,
     additional_directories: Vec<String>,
+    output_schema: Option<Vec<u8>>,
     filesystem_authority: FilesystemAuthority,
     ephemeral: bool,
 }
@@ -383,6 +432,11 @@ fn prepare(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let output_schema = turn
+        .options
+        .output_schema
+        .map(validate_output_schema)
+        .transpose()?;
 
     Ok((
         PreparedTurn {
@@ -391,11 +445,59 @@ fn prepare(
             session,
             model: turn.options.model,
             additional_directories,
+            output_schema,
             filesystem_authority: turn.options.filesystem_authority,
             ephemeral: turn.options.ephemeral,
         },
         cancellation,
     ))
+}
+
+fn validate_output_schema(schema: serde_json::Value) -> Result<Vec<u8>, AgentError> {
+    let encoded = serde_json::to_vec(&schema).map_err(|_| {
+        AgentError::new(
+            ErrorKind::Internal,
+            "Codex output schema could not be serialized",
+            FailurePhase::Validation,
+            EffectState::None,
+        )
+    })?;
+    if encoded.len() > MAX_OUTPUT_SCHEMA_BYTES {
+        return Err(AgentError::invalid_request(format!(
+            "Codex output schema exceeds the {MAX_OUTPUT_SCHEMA_BYTES}-byte limit"
+        )));
+    }
+    if !jsonschema::draft202012::meta::is_valid(&schema) {
+        return Err(AgentError::invalid_request(
+            "Codex output schema is not valid JSON Schema Draft 2020-12",
+        ));
+    }
+    Ok(encoded)
+}
+
+fn materialize_output_schema(
+    schema: &[u8],
+    operation_id: OperationId,
+) -> Result<tempfile::NamedTempFile, AgentError> {
+    let prefix = format!("tower-agent-codex-schema-{operation_id}-");
+    let mut file = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(".json")
+        .tempfile()
+        .map_err(|_| output_schema_file_error())?;
+    file.write_all(schema)
+        .and_then(|()| file.as_file_mut().sync_all())
+        .map_err(|_| output_schema_file_error())?;
+    Ok(file)
+}
+
+fn output_schema_file_error() -> AgentError {
+    AgentError::new(
+        ErrorKind::Internal,
+        "Codex output schema temporary file could not be prepared",
+        FailurePhase::Launch,
+        EffectState::None,
+    )
 }
 
 fn compose_prompt(prompt: &str, system_prompt: Option<&str>) -> String {
@@ -407,7 +509,11 @@ fn compose_prompt(prompt: &str, system_prompt: Option<&str>) -> String {
     }
 }
 
-fn fresh_command(turn: &PreparedTurn, ambient: CodexAmbientContextPolicy) -> ExecCommand {
+fn fresh_command(
+    turn: &PreparedTurn,
+    ambient: CodexAmbientContextPolicy,
+    output_schema_path: Option<&str>,
+) -> ExecCommand {
     let mut command = ExecCommand::from_stdin(turn.prompt.clone())
         .sandbox(sandbox_mode(turn.filesystem_authority))
         .skip_git_repo_check();
@@ -424,6 +530,9 @@ fn fresh_command(turn: &PreparedTurn, ambient: CodexAmbientContextPolicy) -> Exe
     if let Some(model) = &turn.model {
         command = command.model(model);
     }
+    if let Some(path) = output_schema_path {
+        command = command.output_schema(path);
+    }
     for directory in &turn.additional_directories {
         command = command.add_dir(directory);
     }
@@ -434,6 +543,7 @@ fn resume_command(
     turn: &PreparedTurn,
     session: &str,
     ambient: CodexAmbientContextPolicy,
+    output_schema_path: Option<&str>,
 ) -> ExecResumeCommand {
     let mut command = ExecResumeCommand::from_stdin(turn.prompt.clone())
         .session_id(session)
@@ -451,6 +561,9 @@ fn resume_command(
     }
     if let Some(model) = &turn.model {
         command = command.model(model);
+    }
+    if let Some(path) = output_schema_path {
+        command = command.output_schema(path);
     }
     command
 }
@@ -670,6 +783,247 @@ mod tests {
         AgentRequest::new(Turn::new(prompt).with_options(options))
     }
 
+    fn test_output_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "description": "schema-secret-sentinel",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        })
+    }
+
+    fn output_schema_options() -> CodexOptions {
+        CodexOptions {
+            output_schema: Some(test_output_schema()),
+            ..CodexOptions::default()
+        }
+    }
+
+    fn operation_schema_files(operation_id: OperationId) -> Vec<PathBuf> {
+        let prefix = format!("tower-agent-codex-schema-{operation_id}-");
+        let mut paths = std::fs::read_dir(std::env::temp_dir())
+            .expect("read system temporary directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".json"))
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    #[tokio::test]
+    async fn invalid_and_oversized_output_schemas_fail_before_launch_without_disclosure() {
+        let invalid_sentinel = "invalid-schema-secret";
+        let invalid = CodexOptions {
+            output_schema: Some(serde_json::json!({
+                "type": invalid_sentinel,
+                "description": invalid_sentinel
+            })),
+            ..CodexOptions::default()
+        };
+        let rendered = format!("{invalid:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains(invalid_sentinel));
+
+        let error = CodexService::new()
+            .with_binary("/definitely/not/a/codex/binary")
+            .oneshot(request("hello", invalid))
+            .await
+            .expect_err("invalid schema must fail before launch");
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert_eq!(error.phase, FailurePhase::Validation);
+        assert_eq!(error.effects, EffectState::None);
+        assert!(!format!("{error:?}").contains(invalid_sentinel));
+
+        let oversized_sentinel = "oversized-schema-secret";
+        let oversized = CodexOptions {
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "title": oversized_sentinel,
+                "description": "x".repeat(MAX_OUTPUT_SCHEMA_BYTES)
+            })),
+            ..CodexOptions::default()
+        };
+        let error = CodexService::new()
+            .with_binary("/definitely/not/a/codex/binary")
+            .oneshot(request("hello", oversized))
+            .await
+            .expect_err("oversized schema must fail before launch");
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert_eq!(error.phase, FailurePhase::Validation);
+        assert_eq!(error.effects, EffectState::None);
+        assert!(!format!("{error:?}").contains(oversized_sentinel));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_schema_temporary_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let encoded = validate_output_schema(test_output_schema()).expect("valid schema");
+        let file = materialize_output_schema(&encoded, OperationId::from_u64(75000))
+            .expect("materialize schema");
+        let mode = file
+            .as_file()
+            .metadata()
+            .expect("schema metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let path = file.path().to_path_buf();
+        drop(file);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fresh_and_resumed_turns_receive_the_schema_and_clean_up_on_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = std::env::temp_dir().join(format!(
+            "tower-agent-codex-output-schema-success-{}.sh",
+            std::process::id()
+        ));
+        let recorded_path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-output-schema-success-{}.path",
+            std::process::id()
+        ));
+        let recorded_schema = std::env::temp_dir().join(format!(
+            "tower-agent-codex-output-schema-success-{}.json",
+            std::process::id()
+        ));
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "previous=\n",
+                "schema_path=\n",
+                "for argument in \"$@\"; do\n",
+                "  case \"$argument\" in *schema-secret-sentinel*) exit 91;; esac\n",
+                "  if [ \"$previous\" = --output-schema ]; then schema_path=$argument; fi\n",
+                "  previous=$argument\n",
+                "done\n",
+                "[ -n \"$schema_path\" ] || exit 92\n",
+                "[ -f \"$schema_path\" ] || exit 93\n",
+                "printf '%s' \"$schema_path\" > '{}'\n",
+                "cat \"$schema_path\" > '{}'\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"thread-schema\"}}'\n",
+                "printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}'\n",
+                "printf '%s\\n' '{{\"type\":\"turn.completed\"}}'\n",
+            ),
+            recorded_path.display(),
+            recorded_schema.display()
+        );
+        std::fs::write(&binary, script).expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+        let service = CodexService::new().with_binary(&binary);
+
+        service
+            .clone()
+            .oneshot(request("fresh", output_schema_options()))
+            .await
+            .expect("fresh structured turn succeeds");
+        let fresh_path = PathBuf::from(
+            std::fs::read_to_string(&recorded_path).expect("fresh schema path recorded"),
+        );
+        let fresh_schema: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&recorded_schema).expect("fresh schema recorded"),
+        )
+        .expect("fresh schema remains JSON");
+        assert_eq!(fresh_schema, test_output_schema());
+        assert!(!fresh_path.exists());
+
+        service
+            .oneshot(AgentRequest::new(
+                Turn::new("resume")
+                    .with_options(output_schema_options())
+                    .resume(SessionHandle::new(PROVIDER, "thread-schema")),
+            ))
+            .await
+            .expect("resumed structured turn succeeds");
+        let resume_path = PathBuf::from(
+            std::fs::read_to_string(&recorded_path).expect("resume schema path recorded"),
+        );
+        let _ = std::fs::remove_file(binary);
+        let _ = std::fs::remove_file(recorded_path);
+        let _ = std::fs::remove_file(recorded_schema);
+        assert!(!resume_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_schema_is_cleaned_after_provider_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = std::env::temp_dir().join(format!(
+            "tower-agent-codex-output-schema-failure-{}.sh",
+            std::process::id()
+        ));
+        let recorded_path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-output-schema-failure-{}.path",
+            std::process::id()
+        ));
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "previous=\n",
+                "for argument in \"$@\"; do\n",
+                "  if [ \"$previous\" = --output-schema ]; then printf '%s' \"$argument\" > '{}'; fi\n",
+                "  previous=$argument\n",
+                "done\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' 'schema-secret-sentinel' >&2\n",
+                "exit 23\n",
+            ),
+            recorded_path.display()
+        );
+        std::fs::write(&binary, script).expect("write failing fake Codex CLI");
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let error = CodexService::new()
+            .with_binary(&binary)
+            .oneshot(request("failure", output_schema_options()))
+            .await
+            .expect_err("provider failure remains an error");
+        let schema_path = PathBuf::from(
+            std::fs::read_to_string(&recorded_path).expect("failure schema path recorded"),
+        );
+        let _ = std::fs::remove_file(binary);
+        let _ = std::fs::remove_file(recorded_path);
+        assert!(!schema_path.exists());
+        assert!(!format!("{error:?}").contains("schema-secret-sentinel"));
+        assert!(!format!("{error:?}").contains(&schema_path.display().to_string()));
+    }
+
+    #[tokio::test]
+    async fn output_schema_is_cleaned_after_launch_failure() {
+        let operation_id = OperationId::from_u64(75004);
+        let before = operation_schema_files(operation_id);
+        let request = AgentRequest::with_context(
+            Turn::new("hello").with_options(output_schema_options()),
+            CallContext::new().with_operation_id(operation_id),
+        );
+        let error = CodexService::new()
+            .with_binary("/definitely/not/a/codex/binary")
+            .oneshot(request)
+            .await
+            .expect_err("missing binary must fail");
+
+        assert_eq!(error.phase, FailurePhase::Launch);
+        assert_eq!(operation_schema_files(operation_id), before);
+        assert!(!format!("{error:?}").contains("schema-secret-sentinel"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn clear_child_environment_keeps_only_allowed_and_explicit_values() {
@@ -820,12 +1174,13 @@ mod tests {
             system_prompt: Some("you are a helper".into()),
             model: Some("gpt-test".into()),
             additional_directories: vec![PathBuf::from("/work/extra")],
+            output_schema: None,
             filesystem_authority: FilesystemAuthority::ReadOnly,
             ephemeral: false,
         };
         let (prepared, _) =
             prepare(request("do it", options), &AuthorityPolicy::read_only()).expect("valid turn");
-        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit).args();
+        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit, None).args();
 
         assert!(
             args.windows(2)
@@ -854,7 +1209,7 @@ mod tests {
             .with_options(options)
             .in_directory(&crate_root);
         let (prepared, _) = prepare(AgentRequest::new(turn), &policy).expect("authorized turn");
-        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit).args();
+        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit, None).args();
 
         assert!(
             args.windows(2)
@@ -943,10 +1298,12 @@ mod tests {
             session: Some("thread-1".into()),
             model: None,
             additional_directories: Vec::new(),
+            output_schema: None,
             filesystem_authority: FilesystemAuthority::ReadOnly,
             ephemeral: false,
         };
-        let args = resume_command(&turn, "thread-1", CodexAmbientContextPolicy::Inherit).args();
+        let args =
+            resume_command(&turn, "thread-1", CodexAmbientContextPolicy::Inherit, None).args();
 
         assert!(
             args.windows(2)
@@ -1174,8 +1531,25 @@ mod tests {
             "tower-agent-codex-cancel-{}.pid",
             std::process::id()
         ));
+        let schema_record = std::env::temp_dir().join(format!(
+            "tower-agent-codex-cancel-{}.schema",
+            std::process::id()
+        ));
         let script = format!(
-            "#!/bin/sh\ncat >/dev/null\nsleep 30 </dev/null &\nchild=$!\nprintf 'parent=%s\\nchild=%s\\n' \"$$\" \"$child\" > '{}'\nwait \"$child\"\n",
+            concat!(
+                "#!/bin/sh\n",
+                "previous=\n",
+                "for argument in \"$@\"; do\n",
+                "  if [ \"$previous\" = --output-schema ]; then printf '%s' \"$argument\" > '{}'; fi\n",
+                "  previous=$argument\n",
+                "done\n",
+                "cat >/dev/null\n",
+                "sleep 30 </dev/null &\n",
+                "child=$!\n",
+                "printf 'parent=%s\\nchild=%s\\n' \"$$\" \"$child\" > '{}'\n",
+                "wait \"$child\"\n",
+            ),
+            schema_record.display(),
             pid_path.display()
         );
         std::fs::write(&path, script).expect("write blocking fake Codex CLI");
@@ -1185,7 +1559,7 @@ mod tests {
 
         let cancellation = CancellationToken::new();
         let request = AgentRequest::with_context(
-            Turn::new("hello").with_options(CodexOptions::default()),
+            Turn::new("hello").with_options(output_schema_options()),
             CallContext::new().with_cancellation(cancellation.clone()),
         );
         let call = tokio::spawn(
@@ -1206,6 +1580,11 @@ mod tests {
         );
         let pids =
             std::fs::read_to_string(&pid_path).expect("fake Codex recorded its process tree");
+        let output_schema_path = PathBuf::from(
+            std::fs::read_to_string(&schema_record)
+                .expect("fake Codex recorded its output schema path"),
+        );
+        assert!(output_schema_path.exists());
         cancellation.cancel();
         let error = tokio::time::timeout(Duration::from_secs(2), call)
             .await
@@ -1214,10 +1593,14 @@ mod tests {
             .expect_err("cancelled call must fail");
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(pid_path);
+        let _ = std::fs::remove_file(schema_record);
 
         assert_eq!(error.kind, ErrorKind::Cancelled);
         assert_eq!(error.phase, FailurePhase::Running);
         assert_eq!(error.effects, EffectState::Possible);
+        assert!(!output_schema_path.exists());
+        assert!(!format!("{error:?}").contains("schema-secret-sentinel"));
+        assert!(!format!("{error:?}").contains(&output_schema_path.display().to_string()));
         for line in pids.lines() {
             let (_, pid) = line.split_once('=').expect("pid line has a key");
             let output = std::process::Command::new("ps")
