@@ -69,9 +69,10 @@ pub struct TurnOutcome {
 
 /// Partial terminal evidence retained when a provider call fails.
 ///
-/// Every field is optional because absence means the provider did not report
-/// it. Provider-private session handles remain redacted in `Debug` and must be
-/// translated by a host before crossing a protocol boundary.
+/// Every field is optional because absence means neither the provider nor the
+/// host's pre-launch assignment established it. Provider-private session
+/// handles remain redacted in `Debug` and must be translated by a host before
+/// crossing a protocol boundary.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FailureEvidence {
     pub session: Option<SessionHandle>,
