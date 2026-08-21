@@ -46,6 +46,7 @@ pub struct CallContext {
     deadline: Option<Instant>,
     cancellation: CancellationToken,
     events: EventObserver,
+    preassigned_session: Option<SessionHandle>,
 }
 
 impl CallContext {
@@ -88,6 +89,20 @@ impl CallContext {
         self.events = events;
         self
     }
+
+    /// A host-owned provider session identity reserved before a fresh launch.
+    ///
+    /// Provider adapters must either honor this exactly or reject it before
+    /// launch. It is local execution context, not portable caller input, and
+    /// conflicts with a turn that already requests resume.
+    pub fn preassigned_session(&self) -> Option<&SessionHandle> {
+        self.preassigned_session.as_ref()
+    }
+
+    pub fn with_preassigned_session(mut self, session: SessionHandle) -> Self {
+        self.preassigned_session = Some(session);
+        self
+    }
 }
 
 impl Default for CallContext {
@@ -97,6 +112,7 @@ impl Default for CallContext {
             deadline: None,
             cancellation: CancellationToken::new(),
             events: EventObserver::default(),
+            preassigned_session: None,
         }
     }
 }

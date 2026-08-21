@@ -348,17 +348,28 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
                 ))
             });
         }
+        let preassigned_session = match validate_preassigned_session(&request) {
+            Ok(session) => session,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
 
         let ambient_context = match effective_ambient_context(
             self.ambient_context,
             request.body.options.ambient_context,
         ) {
             Ok(context) => context,
-            Err(error) => return Box::pin(async move { Err(error) }),
+            Err(error) => {
+                let error = attach_preassigned_session(error, preassigned_session.as_ref());
+                return Box::pin(async move { Err(error) });
+            }
         };
-        let query = match build_query(&request.body, ambient_context) {
+        let query = match build_query(&request.body, ambient_context, preassigned_session.as_ref())
+        {
             Ok(query) => query,
-            Err(error) => return Box::pin(async move { Err(error) }),
+            Err(error) => {
+                let error = attach_preassigned_session(error, preassigned_session.as_ref());
+                return Box::pin(async move { Err(error) });
+            }
         };
         let operation_id = request.context.operation_id();
         let claude = match self.build_claude(
@@ -367,7 +378,10 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
             operation_id,
         ) {
             Ok(claude) => claude,
-            Err(error) => return Box::pin(async move { Err(error) }),
+            Err(error) => {
+                let error = attach_preassigned_session(error, preassigned_session.as_ref());
+                return Box::pin(async move { Err(error) });
+            }
         };
         let observer = request.context.events().clone();
         let cancellation = request.context.cancellation().clone();
@@ -377,8 +391,43 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
             .as_ref()
             .map(|session| session.value().to_string());
 
-        Box::pin(run(claude, query, observer, cancellation, prior_session))
+        Box::pin(run(
+            claude,
+            query,
+            observer,
+            cancellation,
+            prior_session,
+            preassigned_session,
+        ))
     }
+}
+
+fn validate_preassigned_session(
+    request: &AgentRequest<Turn<ClaudeOptions>>,
+) -> Result<Option<SessionHandle>, AgentError> {
+    let Some(session) = request.context.preassigned_session() else {
+        return Ok(None);
+    };
+    if request.body.session.is_some() {
+        return Err(AgentError::invalid_request(
+            "a preassigned Claude session cannot be combined with resume",
+        ));
+    }
+    if session.provider() != PROVIDER {
+        return Err(AgentError::unsupported(
+            "the preassigned session is not a Claude session",
+        ));
+    }
+    let parsed = uuid::Uuid::parse_str(session.value()).map_err(|_| {
+        AgentError::invalid_request("a preassigned Claude session must be a canonical UUID")
+    })?;
+    let canonical = parsed.hyphenated().to_string();
+    if session.value() != canonical {
+        return Err(AgentError::invalid_request(
+            "a preassigned Claude session must be a canonical lowercase UUID",
+        ));
+    }
+    Ok(Some(SessionHandle::new(PROVIDER, canonical)))
 }
 
 fn effective_ambient_context(
@@ -406,6 +455,7 @@ fn effective_ambient_context(
 fn build_query(
     turn: &Turn<ClaudeOptions>,
     ambient_context: ClaudeAmbientContext,
+    preassigned_session: Option<&SessionHandle>,
 ) -> Result<QueryCommand, AgentError> {
     let options = &turn.options;
     if options
@@ -486,6 +536,8 @@ fn build_query(
     }
     if let Some(session) = &turn.session {
         command = command.resume(session.value());
+    } else if let Some(session) = preassigned_session {
+        command = command.session_id(session.value());
     }
     if let Some(turns) = options.max_turns {
         command = command.max_turns(turns);
@@ -525,28 +577,48 @@ async fn run(
     observer: tower_agent::EventObserver,
     cancellation: tower_agent::CancellationToken,
     prior_session: Option<String>,
+    preassigned_session: Option<SessionHandle>,
 ) -> Result<TurnOutcome, AgentError> {
     if cancellation.is_cancelled() {
-        return Err(cancelled_before_launch());
+        return Err(attach_preassigned_session(
+            cancelled_before_launch(),
+            preassigned_session.as_ref(),
+        ));
     }
 
     let _ = observer.try_emit(AgentEvent::Started);
     let result = query
         .execute_json_cancellable(&claude, cancellation.cancelled())
         .await
-        .map_err(map_wrapper_error)?;
+        .map_err(|error| {
+            attach_preassigned_session(map_wrapper_error(error), preassigned_session.as_ref())
+        })?;
+    if let Some(session) = &preassigned_session
+        && !result.session_id.is_empty()
+        && result.session_id != session.value()
+    {
+        return Err(AgentError::new(
+            ErrorKind::Provider,
+            "Claude returned a different session than the host preassigned",
+            FailurePhase::Settlement,
+            EffectState::Possible,
+        )
+        .with_evidence(query_evidence(&result, Some(session))));
+    }
     if result.is_error {
-        return Err(map_query_error(&result));
+        return Err(map_query_error(&result, preassigned_session.as_ref()));
     }
 
     let _ = observer.try_emit(AgentEvent::OutputDelta {
         text: result.result.clone(),
     });
     let mut outcome = TurnOutcome::new(result.result);
-    outcome.session = (!result.session_id.is_empty())
-        .then_some(result.session_id)
-        .or(prior_session)
-        .map(|value| SessionHandle::new(PROVIDER, value));
+    outcome.session = preassigned_session.or_else(|| {
+        (!result.session_id.is_empty())
+            .then_some(result.session_id)
+            .or(prior_session)
+            .map(|value| SessionHandle::new(PROVIDER, value))
+    });
     outcome.usage = result
         .usage
         .as_ref()
@@ -569,10 +641,15 @@ fn map_usage(usage: &claude_wrapper::TokenUsage) -> TokenUsage {
     }
 }
 
-fn query_evidence(result: &QueryResult) -> FailureEvidence {
+fn query_evidence(
+    result: &QueryResult,
+    preassigned_session: Option<&SessionHandle>,
+) -> FailureEvidence {
     FailureEvidence {
-        session: (!result.session_id.is_empty())
-            .then(|| SessionHandle::new(PROVIDER, result.session_id.clone())),
+        session: preassigned_session.cloned().or_else(|| {
+            (!result.session_id.is_empty())
+                .then(|| SessionHandle::new(PROVIDER, result.session_id.clone()))
+        }),
         usage: result
             .usage
             .as_ref()
@@ -612,7 +689,10 @@ fn cancelled_before_launch() -> AgentError {
     )
 }
 
-fn map_query_error(result: &QueryResult) -> AgentError {
+fn map_query_error(
+    result: &QueryResult,
+    preassigned_session: Option<&SessionHandle>,
+) -> AgentError {
     let kind = match result.extra.get("subtype").and_then(|value| value.as_str()) {
         Some("error_max_turns") => ErrorKind::Limit,
         Some("error_max_budget_usd") => ErrorKind::Budget,
@@ -624,7 +704,20 @@ fn map_query_error(result: &QueryResult) -> AgentError {
         FailurePhase::Running,
         EffectState::Possible,
     )
-    .with_evidence(query_evidence(result))
+    .with_evidence(query_evidence(result, preassigned_session))
+}
+
+fn attach_preassigned_session(
+    mut error: AgentError,
+    preassigned_session: Option<&SessionHandle>,
+) -> AgentError {
+    if let Some(session) = preassigned_session {
+        error
+            .evidence
+            .get_or_insert_with(|| Box::new(FailureEvidence::default()))
+            .session = Some(session.clone());
+    }
+    error
 }
 
 fn launch_error(message: impl Into<String>) -> AgentError {
@@ -992,6 +1085,13 @@ mod tests {
 
     use super::*;
 
+    const PREASSIGNED_SESSION: &str = "a1111111-1111-4111-8111-111111111111";
+
+    fn preassigned_context() -> CallContext {
+        CallContext::new()
+            .with_preassigned_session(SessionHandle::new(PROVIDER, PREASSIGNED_SESSION))
+    }
+
     fn fake_claude() -> Claude {
         Claude::builder().binary("/usr/bin/true").build().unwrap()
     }
@@ -1018,9 +1118,13 @@ mod tests {
             .resume(SessionHandle::new(PROVIDER, "sess-123"))
             .with_options(options);
 
-        let rendered = build_query(&turn, ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full))
-            .expect("valid query")
-            .to_command_string(&fake_claude());
+        let rendered = build_query(
+            &turn,
+            ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full),
+            None,
+        )
+        .expect("valid query")
+        .to_command_string(&fake_claude());
         assert!(!rendered.contains("run the tests"));
         for expected in [
             "You are the tester.",
@@ -1063,7 +1167,7 @@ mod tests {
             },
         ] {
             let turn = Turn::new("hello").with_options(options);
-            let error = build_query(&turn, ClaudeAmbientContext::Inherit)
+            let error = build_query(&turn, ClaudeAmbientContext::Inherit, None)
                 .expect_err("invalid options must be refused");
             assert_eq!(error.kind, ErrorKind::InvalidRequest);
         }
@@ -1082,6 +1186,76 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Unsupported);
         assert_eq!(error.phase, FailurePhase::Validation);
         assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[tokio::test]
+    async fn preassigned_sessions_are_validated_before_launch() {
+        let invalid = [
+            (
+                SessionHandle::new("codex", PREASSIGNED_SESSION),
+                ErrorKind::Unsupported,
+            ),
+            (
+                SessionHandle::new(PROVIDER, "not-a-uuid"),
+                ErrorKind::InvalidRequest,
+            ),
+            (
+                SessionHandle::new(PROVIDER, PREASSIGNED_SESSION.to_uppercase()),
+                ErrorKind::InvalidRequest,
+            ),
+        ];
+        for (session, expected_kind) in invalid {
+            let request = AgentRequest::with_context(
+                Turn::new("hello").with_options(ClaudeOptions::default()),
+                CallContext::new().with_preassigned_session(session),
+            );
+            let error = ClaudeService::new()
+                .with_binary("/definitely/not/a/claude/binary")
+                .oneshot(request)
+                .await
+                .expect_err("invalid preassignment must not launch");
+            assert_eq!(error.kind, expected_kind);
+            assert_eq!(error.phase, FailurePhase::Validation);
+            assert_eq!(error.effects, EffectState::None);
+        }
+
+        let request = AgentRequest::with_context(
+            Turn::new("hello")
+                .resume(SessionHandle::new(PROVIDER, "existing-session"))
+                .with_options(ClaudeOptions::default()),
+            preassigned_context(),
+        );
+        let error = ClaudeService::new()
+            .with_binary("/definitely/not/a/claude/binary")
+            .oneshot(request)
+            .await
+            .expect_err("preassignment and resume must conflict before launch");
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert_eq!(error.phase, FailurePhase::Validation);
+        assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[tokio::test]
+    async fn preassigned_session_survives_a_launch_without_result_evidence() {
+        let request = AgentRequest::with_context(
+            Turn::new("hello").with_options(ClaudeOptions::default()),
+            preassigned_context(),
+        );
+        let error = ClaudeService::new()
+            .with_binary("/definitely/not/a/claude/binary")
+            .oneshot(request)
+            .await
+            .expect_err("missing binary must fail");
+
+        assert_eq!(error.phase, FailurePhase::Launch);
+        assert_eq!(
+            error
+                .evidence
+                .as_deref()
+                .and_then(|evidence| evidence.session.as_ref())
+                .map(SessionHandle::value),
+            Some(PREASSIGNED_SESSION)
+        );
     }
 
     #[tokio::test]
@@ -1121,7 +1295,7 @@ mod tests {
             extra,
         };
 
-        let error = map_query_error(&result);
+        let error = map_query_error(&result, None);
         let evidence = error.evidence.as_deref().expect("failure evidence");
         assert_eq!(error.kind, ErrorKind::Budget);
         assert_eq!(evidence.cost, Some(Cost::usd(1.0)));
@@ -1178,6 +1352,65 @@ mod tests {
             assert_eq!(error.effects, EffectState::Possible);
             assert!(!error.message.contains("private-session"));
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preassigned_session_reaches_fresh_argv_and_terminal_evidence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-preassigned-{}.sh",
+            std::process::id()
+        ));
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "case \" $* \" in *\" --session-id {} \"*) ;; *) exit 91;; esac\n",
+                "prompt=$(cat)\n",
+                "if [ \"$prompt\" = failure ]; then\n",
+                "  printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"result\":\"stopped\",\"is_error\":true}}'\n",
+                "else\n",
+                "  printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"{}\",\"is_error\":false}}'\n",
+                "fi\n",
+            ),
+            PREASSIGNED_SESSION, PREASSIGNED_SESSION
+        );
+        std::fs::write(&path, script).expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let service = ClaudeService::new().with_binary(&path);
+
+        let success = service
+            .clone()
+            .oneshot(AgentRequest::with_context(
+                Turn::new("success").with_options(ClaudeOptions::default()),
+                preassigned_context(),
+            ))
+            .await
+            .expect("assigned fresh turn succeeds");
+        assert_eq!(
+            success.session.as_ref().map(SessionHandle::value),
+            Some(PREASSIGNED_SESSION)
+        );
+
+        let error = service
+            .oneshot(AgentRequest::with_context(
+                Turn::new("failure").with_options(ClaudeOptions::default()),
+                preassigned_context(),
+            ))
+            .await
+            .expect_err("result-shaped failure remains an error");
+        let _ = std::fs::remove_file(path);
+        assert_eq!(
+            error
+                .evidence
+                .as_deref()
+                .and_then(|evidence| evidence.session.as_ref())
+                .map(SessionHandle::value),
+            Some(PREASSIGNED_SESSION)
+        );
     }
 
     #[cfg(unix)]
@@ -1378,7 +1611,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         let request = AgentRequest::with_context(
             Turn::new("hello").with_options(ClaudeOptions::default()),
-            CallContext::new().with_cancellation(cancellation.clone()),
+            preassigned_context().with_cancellation(cancellation.clone()),
         );
         let call = tokio::spawn(
             ClaudeService::new()
@@ -1410,6 +1643,14 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Cancelled);
         assert_eq!(error.phase, FailurePhase::Running);
         assert_eq!(error.effects, EffectState::Possible);
+        assert_eq!(
+            error
+                .evidence
+                .as_deref()
+                .and_then(|evidence| evidence.session.as_ref())
+                .map(SessionHandle::value),
+            Some(PREASSIGNED_SESSION)
+        );
         for line in pids.lines() {
             let (_, pid) = line.split_once('=').expect("pid line has a key");
             let output = std::process::Command::new("ps")

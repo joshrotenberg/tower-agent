@@ -270,6 +270,13 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
     }
 
     fn call(&mut self, request: AgentRequest<Turn<CodexOptions>>) -> Self::Future {
+        if request.context.preassigned_session().is_some() {
+            return Box::pin(async {
+                Err(AgentError::unsupported(
+                    "Codex does not support host-preassigned fresh session IDs",
+                ))
+            });
+        }
         let service = self.clone();
         let observer = request.context.events().clone();
         let operation_id = request.context.operation_id();
@@ -886,6 +893,26 @@ mod tests {
             .expect_err("foreign session must fail");
 
         assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[tokio::test]
+    async fn preassigned_fresh_session_is_refused_before_codex_launch() {
+        let request = AgentRequest::with_context(
+            Turn::new("hello").with_options(CodexOptions::default()),
+            CallContext::new().with_preassigned_session(SessionHandle::new(
+                "codex",
+                "11111111-1111-4111-8111-111111111111",
+            )),
+        );
+        let error = CodexService::new()
+            .with_binary("/definitely/not/a/codex/binary")
+            .oneshot(request)
+            .await
+            .expect_err("unsupported preassignment must not launch Codex");
+
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert_eq!(error.phase, FailurePhase::Validation);
         assert_eq!(error.effects, EffectState::None);
     }
 

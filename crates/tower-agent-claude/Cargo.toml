@@ -17,6 +17,7 @@ tower.workspace = true
 
 claude-wrapper.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

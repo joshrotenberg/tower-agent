@@ -142,6 +142,24 @@ The host owns launch configuration such as provider home and configuration
 directories. Portable request bodies do not carry ambient credentials or
 provider-private launch context.
 
+### Host-preassigned sessions
+
+`CallContext::with_preassigned_session` lets a durable host reserve a
+provider-tagged session handle before a fresh launch. It is deliberately local
+context rather than a portable `Turn` option: an interface caller should not be
+able to choose provider persistence identities.
+
+Claude accepts this control for fresh turns because its CLI can honor a
+specific `--session-id`. The adapter requires a Claude-tagged canonical
+lowercase UUID and rejects any combination with `Turn::resume` before launch.
+Success, result-shaped failure, cancellation, process failure, and launch
+failure all retain the same assigned handle as terminal evidence. If Claude
+reports a different session, settlement fails instead of silently adopting it.
+Provider-generated fresh IDs and caller-facing resume handles keep their
+existing paths when no host assignment is present. Providers without an exact
+fresh-session primitive must reject this context rather than pretend to honor
+it.
+
 ### Child process environment
 
 `ChildEnvironmentPolicy` is host-owned and shared by both provider services.
