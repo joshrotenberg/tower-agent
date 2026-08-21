@@ -175,7 +175,9 @@ authority. Half-open probes must be explicitly non-effectful or isolated.
 These are unsafe by default. A retry or alternate provider is admissible only
 when effect evidence proves no external effect occurred, or when the operation
 has a provider-backed idempotency contract. `EffectState::Possible` forbids an
-automatic replay.
+automatic replay. Without an idempotency contract, only `EffectState::None`
+permits an automatic retry; a deterministic error classification alone does
+not prove that an earlier step in the turn produced no effects.
 
 ## Service laws
 
