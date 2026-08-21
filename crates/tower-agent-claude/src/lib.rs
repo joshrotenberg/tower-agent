@@ -13,6 +13,11 @@
 //! before returning a terminal cancellation result. Timeout and stdin setup
 //! failures use the same ownership path. On non-Unix platforms, cleanup awaits
 //! the direct child but cannot guarantee ownership of its descendants.
+//!
+//! [`ClaudeAmbientContext`] keeps inherited, setting-source hermetic, safe, and
+//! bare modes distinct. The service can require a host-owned baseline that a
+//! remote turn cannot weaken. These are provider context controls rather than
+//! OS isolation; child environment and filesystem visibility remain separate.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -57,14 +62,29 @@ pub struct ClaudeOptions {
     /// a project .mcp.json that registers the host itself would otherwise
     /// make every turn boot a nested host instance as an MCP server.
     pub strict_mcp_config: bool,
-    /// Ambient-context seal for the turn. Full drops every setting source
-    /// (user, project, local): no ambient CLAUDE.md, skills, or agents
-    /// leak in, and MCP is sealed too. Project keeps only the user's
-    /// global scope. None leaves the CLI's normal ambient loading.
-    pub hermetic: Option<ClaudeHermetic>,
+    /// Requested ambient-context mode. The service's host-owned baseline is
+    /// always applied and cannot be weakened by a turn.
+    pub ambient_context: ClaudeAmbientContext,
 }
 
-/// Ambient-context seal scope, mirroring the wrapper's HermeticScope.
+/// Mutually exclusive Claude ambient-context modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClaudeAmbientContext {
+    /// Preserve the CLI's normal ambient behavior unless the host requires a
+    /// stronger baseline.
+    #[default]
+    Inherit,
+    /// Seal selected setting sources and MCP configuration while preserving
+    /// normal OAuth and keychain authentication.
+    Hermetic(ClaudeHermetic),
+    /// Disable customizations while preserving normal authentication.
+    Safe,
+    /// Use the most minimal scripted mode. OAuth and keychain authentication
+    /// are unavailable; use an API key or explicit helper.
+    Bare,
+}
+
+/// Setting-source scope used by [`ClaudeAmbientContext::Hermetic`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaudeHermetic {
     /// Drop user, project, and local setting sources.
@@ -129,6 +149,7 @@ pub struct ClaudeService {
     config_directory: Option<PathBuf>,
     kill_grace: Option<Duration>,
     child_environment: ChildEnvironmentPolicy,
+    ambient_context: ClaudeAmbientContext,
 }
 
 impl ClaudeService {
@@ -139,6 +160,7 @@ impl ClaudeService {
             config_directory: None,
             kill_grace: None,
             child_environment: ChildEnvironmentPolicy::default(),
+            ambient_context: ClaudeAmbientContext::default(),
         }
     }
 
@@ -170,6 +192,18 @@ impl ClaudeService {
 
     pub const fn child_environment_policy(&self) -> &ChildEnvironmentPolicy {
         &self.child_environment
+    }
+
+    /// Set the host-owned minimum ambient-context mode. A turn may strengthen
+    /// a hermetic setting-source seal but cannot replace safe or bare mode with
+    /// a conflicting posture.
+    pub fn with_ambient_context_policy(mut self, policy: ClaudeAmbientContext) -> Self {
+        self.ambient_context = policy;
+        self
+    }
+
+    pub const fn ambient_context_policy(&self) -> ClaudeAmbientContext {
+        self.ambient_context
     }
 
     fn build_claude(
@@ -267,7 +301,14 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
             });
         }
 
-        let query = match build_query(&request.body) {
+        let ambient_context = match effective_ambient_context(
+            self.ambient_context,
+            request.body.options.ambient_context,
+        ) {
+            Ok(context) => context,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let query = match build_query(&request.body, ambient_context) {
             Ok(query) => query,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
@@ -290,7 +331,32 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
     }
 }
 
-fn build_query(turn: &Turn<ClaudeOptions>) -> Result<QueryCommand, AgentError> {
+fn effective_ambient_context(
+    host: ClaudeAmbientContext,
+    requested: ClaudeAmbientContext,
+) -> Result<ClaudeAmbientContext, AgentError> {
+    match (host, requested) {
+        (ClaudeAmbientContext::Inherit, requested) => Ok(requested),
+        (host, ClaudeAmbientContext::Inherit) => Ok(host),
+        (host, requested) if host == requested => Ok(host),
+        (
+            ClaudeAmbientContext::Hermetic(ClaudeHermetic::Project),
+            ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full),
+        )
+        | (
+            ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full),
+            ClaudeAmbientContext::Hermetic(ClaudeHermetic::Project),
+        ) => Ok(ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full)),
+        _ => Err(AgentError::invalid_request(
+            "requested Claude ambient-context mode conflicts with the host baseline",
+        )),
+    }
+}
+
+fn build_query(
+    turn: &Turn<ClaudeOptions>,
+    ambient_context: ClaudeAmbientContext,
+) -> Result<QueryCommand, AgentError> {
     let options = &turn.options;
     if options
         .model
@@ -390,12 +456,15 @@ fn build_query(turn: &Turn<ClaudeOptions>) -> Result<QueryCommand, AgentError> {
     if options.strict_mcp_config {
         command = command.strict_mcp_config();
     }
-    if let Some(hermetic) = options.hermetic {
-        command = command.hermetic_scoped(match hermetic {
+    command = match ambient_context {
+        ClaudeAmbientContext::Inherit => command,
+        ClaudeAmbientContext::Hermetic(hermetic) => command.hermetic_scoped(match hermetic {
             ClaudeHermetic::Full => HermeticScope::Full,
             ClaudeHermetic::Project => HermeticScope::Project,
-        });
-    }
+        }),
+        ClaudeAmbientContext::Safe => command.safe_mode(),
+        ClaudeAmbientContext::Bare => command.bare(),
+    };
 
     Ok(command.prompt_via_stdin(true))
 }
@@ -729,6 +798,110 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn ambient_context_modes_reach_exact_fake_cli_argv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-ambient-{}.sh",
+            std::process::id()
+        ));
+        let argv_path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-ambient-{}.args",
+            std::process::id()
+        ));
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' \"$@\" > '{}'\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"s\",\"is_error\":false}}'\n",
+            ),
+            argv_path.display()
+        );
+        std::fs::write(&path, script).expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let cases = vec![
+            (
+                ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full),
+                vec![
+                    "--print",
+                    "--output-format",
+                    "json",
+                    "--strict-mcp-config",
+                    "--setting-sources",
+                    "",
+                    "--exclude-dynamic-system-prompt-sections",
+                ],
+            ),
+            (
+                ClaudeAmbientContext::Hermetic(ClaudeHermetic::Project),
+                vec![
+                    "--print",
+                    "--output-format",
+                    "json",
+                    "--strict-mcp-config",
+                    "--setting-sources",
+                    "user",
+                    "--exclude-dynamic-system-prompt-sections",
+                ],
+            ),
+            (
+                ClaudeAmbientContext::Safe,
+                vec!["--print", "--output-format", "json", "--safe-mode"],
+            ),
+            (
+                ClaudeAmbientContext::Bare,
+                vec!["--print", "--output-format", "json", "--bare"],
+            ),
+        ];
+
+        for (ambient_context, expected) in cases {
+            let options = ClaudeOptions {
+                ambient_context,
+                ..ClaudeOptions::default()
+            };
+            ClaudeService::new()
+                .with_binary(&path)
+                .oneshot(AgentRequest::new(Turn::new("hello").with_options(options)))
+                .await
+                .expect("ambient-context fake turn succeeds");
+            let args = std::fs::read_to_string(&argv_path).expect("argv recorded");
+            assert_eq!(args.lines().collect::<Vec<_>>(), expected);
+        }
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(argv_path);
+    }
+
+    #[test]
+    fn host_ambient_context_cannot_be_weakened_or_replaced() {
+        assert_eq!(
+            effective_ambient_context(
+                ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full),
+                ClaudeAmbientContext::Hermetic(ClaudeHermetic::Project),
+            )
+            .expect("full host seal wins"),
+            ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full)
+        );
+        assert_eq!(
+            effective_ambient_context(ClaudeAmbientContext::Safe, ClaudeAmbientContext::Inherit,)
+                .expect("inherit request keeps host safe mode"),
+            ClaudeAmbientContext::Safe
+        );
+
+        let error =
+            effective_ambient_context(ClaudeAmbientContext::Safe, ClaudeAmbientContext::Bare)
+                .expect_err("safe and bare are non-overlapping postures");
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert_eq!(error.phase, FailurePhase::Validation);
+        assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn strict_mcp_config_reaches_the_cli_argv() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -789,13 +962,13 @@ mod tests {
             permission_mode: Some(ClaudePermissionMode::Plan),
             json_schema: Some(r#"{"type":"object"}"#.into()),
             strict_mcp_config: true,
-            hermetic: Some(ClaudeHermetic::Full),
+            ambient_context: ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full),
         };
         let turn = Turn::new("run the tests")
             .resume(SessionHandle::new(PROVIDER, "sess-123"))
             .with_options(options);
 
-        let rendered = build_query(&turn)
+        let rendered = build_query(&turn, ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full))
             .expect("valid query")
             .to_command_string(&fake_claude());
         assert!(!rendered.contains("run the tests"));
@@ -840,7 +1013,8 @@ mod tests {
             },
         ] {
             let turn = Turn::new("hello").with_options(options);
-            let error = build_query(&turn).expect_err("invalid options must be refused");
+            let error = build_query(&turn, ClaudeAmbientContext::Inherit)
+                .expect_err("invalid options must be refused");
             assert_eq!(error.kind, ErrorKind::InvalidRequest);
         }
     }
