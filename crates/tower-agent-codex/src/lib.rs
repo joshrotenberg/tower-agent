@@ -34,13 +34,13 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use codex_wrapper::command::exec::ExecResumeCommand;
-use codex_wrapper::{Codex, ExecCommand, QueryResult, SandboxMode};
+use codex_wrapper::{Codex, ExecCommand, QueryResult, SandboxMode, TurnFailureKind};
 use tower::Service;
 use tower_agent::{
     AgentError, AgentEvent, AgentRequest, AuthorityPolicy, CancellationToken,
-    ChildEnvironmentPolicy, EffectState, ErrorKind, FailurePhase, FilesystemAuthority, OperationId,
-    RequestsFilesystemAuthority, SessionHandle, SpawnObserver, SpawnReceipt, TokenUsage, Turn,
-    TurnOutcome,
+    ChildEnvironmentPolicy, EffectState, ErrorKind, FailureEvidence, FailurePhase,
+    FilesystemAuthority, OperationId, RequestsFilesystemAuthority, SessionHandle, SpawnObserver,
+    SpawnReceipt, TokenUsage, Turn, TurnOutcome,
 };
 
 const PROVIDER: &str = "codex";
@@ -358,7 +358,7 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             drop(output_schema_file);
             let result = result.map_err(map_run_error)?;
 
-            let outcome = adapt_outcome(result, turn.session, started.elapsed(), turn.ephemeral);
+            let outcome = settle_outcome(result, turn.session, started.elapsed(), turn.ephemeral)?;
             let _ = observer.try_emit(AgentEvent::OutputDelta {
                 text: outcome.output.clone(),
             });
@@ -589,27 +589,126 @@ fn sandbox_config(authority: FilesystemAuthority) -> &'static str {
     }
 }
 
-fn adapt_outcome(
+fn settle_outcome(
     result: QueryResult,
     prior_session: Option<String>,
     duration: Duration,
     ephemeral: bool,
-) -> TurnOutcome {
-    let output = result.result;
-    let session = if ephemeral {
-        None
-    } else {
-        result
-            .thread_id
-            .or(result.session_id)
-            .or(prior_session)
-            .map(|value| SessionHandle::new(PROVIDER, value))
+) -> Result<TurnOutcome, AgentError> {
+    let terminal = validate_terminal_events(&result.events)?;
+    let session = validated_result_session(&result, prior_session, ephemeral)?;
+    let usage = result.usage.map(map_usage);
+
+    match terminal {
+        TerminalState::Completed => {
+            let mut outcome = TurnOutcome::new(result.result);
+            outcome.session = session;
+            outcome.usage = usage;
+            outcome.duration = Some(duration);
+            Ok(outcome)
+        }
+        TerminalState::Failed(failure) => {
+            let (kind, message) = match failure {
+                TurnFailureKind::RolloutBudgetExhausted => (
+                    ErrorKind::Budget,
+                    "Codex turn exhausted its rollout token budget",
+                ),
+                _ => (ErrorKind::Provider, "Codex reported a failed turn"),
+            };
+            Err(
+                AgentError::new(kind, message, FailurePhase::Running, EffectState::Possible)
+                    .with_evidence(FailureEvidence {
+                        session,
+                        usage,
+                        duration: Some(duration),
+                        ..FailureEvidence::default()
+                    }),
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalState {
+    Completed,
+    Failed(TurnFailureKind),
+}
+
+fn validate_terminal_events(
+    events: &[codex_wrapper::JsonLineEvent],
+) -> Result<TerminalState, AgentError> {
+    let mut terminals = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.is_turn_completed() || event.is_turn_failed());
+    let Some((index, terminal)) = terminals.next() else {
+        return Err(codex_settlement_error(
+            "Codex event stream did not contain a terminal turn event",
+        ));
     };
-    let mut outcome = TurnOutcome::new(output);
-    outcome.session = session;
-    outcome.usage = result.usage.map(map_usage);
-    outcome.duration = Some(duration);
-    outcome
+    if terminals.next().is_some() || index + 1 != events.len() {
+        return Err(codex_settlement_error(
+            "Codex event stream contained conflicting terminal state",
+        ));
+    }
+    if terminal.is_turn_completed() {
+        Ok(TerminalState::Completed)
+    } else {
+        Ok(TerminalState::Failed(
+            terminal
+                .turn_failure_kind()
+                .unwrap_or(TurnFailureKind::Other),
+        ))
+    }
+}
+
+fn validated_result_session(
+    result: &QueryResult,
+    prior_session: Option<String>,
+    ephemeral: bool,
+) -> Result<Option<SessionHandle>, AgentError> {
+    let thread = consistent_provider_handle(
+        result
+            .events
+            .iter()
+            .filter_map(codex_wrapper::JsonLineEvent::thread_id)
+            .chain(result.thread_id.as_deref()),
+    )?;
+    let session = consistent_provider_handle(
+        result
+            .events
+            .iter()
+            .filter_map(codex_wrapper::JsonLineEvent::session_id)
+            .chain(result.session_id.as_deref()),
+    )?;
+    let value = thread.or(session).or(prior_session);
+    Ok((!ephemeral)
+        .then_some(value)
+        .flatten()
+        .map(|value| SessionHandle::new(PROVIDER, value)))
+}
+
+fn consistent_provider_handle<'a>(
+    mut values: impl Iterator<Item = &'a str>,
+) -> Result<Option<String>, AgentError> {
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if first.trim().is_empty() || first.starts_with('-') || values.any(|value| value != first) {
+        return Err(codex_settlement_error(
+            "Codex event stream contained invalid session evidence",
+        ));
+    }
+    Ok(Some(first.to_string()))
+}
+
+fn codex_settlement_error(message: &'static str) -> AgentError {
+    AgentError::new(
+        ErrorKind::Provider,
+        message,
+        FailurePhase::Settlement,
+        EffectState::Possible,
+    )
 }
 
 fn map_usage(usage: codex_wrapper::TokenUsage) -> TokenUsage {
@@ -786,6 +885,15 @@ mod tests {
 
     fn request(prompt: &str, options: CodexOptions) -> AgentRequest<Turn<CodexOptions>> {
         AgentRequest::new(Turn::new(prompt).with_options(options))
+    }
+
+    fn query_result(lines: &[&str]) -> QueryResult {
+        QueryResult::from_events(
+            lines
+                .iter()
+                .map(|line| serde_json::from_str(line).expect("valid Codex JSONL event"))
+                .collect(),
+        )
     }
 
     fn test_output_schema() -> serde_json::Value {
@@ -1361,14 +1469,78 @@ mod tests {
             session_id: Some("session-1".into()),
             thread_id: Some("thread-1".into()),
             usage: None,
-            events: Vec::new(),
+            events: vec![serde_json::from_str(r#"{"type":"turn.completed"}"#).unwrap()],
         };
 
-        let outcome = adapt_outcome(result, None, Duration::ZERO, false);
+        let outcome = settle_outcome(result, None, Duration::ZERO, false)
+            .expect("completed result settles successfully");
         assert_eq!(
             outcome.session.as_ref().map(SessionHandle::value),
             Some("thread-1")
         );
+    }
+
+    #[test]
+    fn terminal_events_gate_success_and_classify_failure() {
+        let valid = query_result(&[
+            r#"{"type":"thread.started","thread_id":"thread-valid"}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}"#,
+        ]);
+        let outcome = settle_outcome(valid, None, Duration::from_millis(12), false)
+            .expect("one final completion is successful");
+        assert_eq!(outcome.output, "done");
+        assert_eq!(outcome.usage.and_then(TokenUsage::total), Some(5));
+
+        let failed = query_result(&[
+            r#"{"type":"thread.started","thread_id":"thread-failed"}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial-secret"}}"#,
+            r#"{"type":"turn.failed","error":{"message":"shared rollout token budget exhausted"}}"#,
+        ]);
+        let error = settle_outcome(failed, None, Duration::from_millis(7), false)
+            .expect_err("failed terminal event is never success");
+        assert_eq!(error.kind, ErrorKind::Budget);
+        assert_eq!(error.phase, FailurePhase::Running);
+        assert_eq!(error.effects, EffectState::Possible);
+        assert_eq!(
+            error
+                .evidence
+                .as_deref()
+                .and_then(|evidence| evidence.session.as_ref())
+                .map(SessionHandle::value),
+            Some("thread-failed")
+        );
+        assert!(!format!("{error:?}").contains("partial-secret"));
+
+        let missing = query_result(&[
+            r#"{"type":"thread.started","thread_id":"thread-missing"}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial-missing"}}"#,
+        ]);
+        let error = settle_outcome(missing, None, Duration::ZERO, false)
+            .expect_err("missing terminal event is settlement failure");
+        assert_eq!(error.kind, ErrorKind::Provider);
+        assert_eq!(error.phase, FailurePhase::Settlement);
+        assert_eq!(error.effects, EffectState::Possible);
+        assert!(error.evidence.is_none());
+        assert!(!format!("{error:?}").contains("partial-missing"));
+
+        for conflicting in [
+            query_result(&[
+                r#"{"type":"turn.failed","error":{"message":"failed"}}"#,
+                r#"{"type":"turn.completed"}"#,
+            ]),
+            query_result(&[
+                r#"{"type":"turn.completed"}"#,
+                r#"{"type":"item.completed","item":{"type":"agent_message","text":"after-terminal"}}"#,
+            ]),
+        ] {
+            let error = settle_outcome(conflicting, None, Duration::ZERO, false)
+                .expect_err("conflicting terminal state is settlement failure");
+            assert_eq!(error.kind, ErrorKind::Provider);
+            assert_eq!(error.phase, FailurePhase::Settlement);
+            assert_eq!(error.effects, EffectState::Possible);
+            assert!(error.evidence.is_none());
+        }
     }
 
     #[cfg(unix)]
@@ -1410,6 +1582,43 @@ mod tests {
             outcome.session.as_ref().map(SessionHandle::value),
             Some("thread-1")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_zero_failed_stream_is_not_a_successful_outcome() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-terminal-failure-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-failed\"}'\n",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"partial-secret\"}}'\n",
+                "printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"shared rollout token budget exhausted\"}}'\n",
+            ),
+        )
+        .expect("write failed-turn fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let error = CodexService::new()
+            .with_binary(&path)
+            .oneshot(request("hello", CodexOptions::default()))
+            .await
+            .expect_err("exit-zero turn.failed stream must fail");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(error.kind, ErrorKind::Budget);
+        assert_eq!(error.phase, FailurePhase::Running);
+        assert_eq!(error.effects, EffectState::Possible);
+        assert!(!format!("{error:?}").contains("partial-secret"));
     }
 
     #[cfg(unix)]
