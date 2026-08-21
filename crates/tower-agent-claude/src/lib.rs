@@ -292,9 +292,7 @@ impl ClaudeService {
                 ));
             }));
         }
-        builder
-            .build()
-            .map_err(|error| launch_error(format!("claude unavailable: {error}")))
+        builder.build().map_err(|_| launch_error())
     }
 }
 
@@ -679,23 +677,8 @@ fn query_evidence_without_session(result: &QueryResult) -> FailureEvidence {
     evidence
 }
 
-/// Bounded stderr tail so a terminal failure explains itself without
-/// carrying unbounded provider output.
-fn command_failed_message(provider: &str, exit_code: i32, stderr: &str) -> String {
-    let tail: String = stderr
-        .trim()
-        .chars()
-        .rev()
-        .take(400)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    if tail.is_empty() {
-        format!("{provider} command failed with exit code {exit_code}")
-    } else {
-        format!("{provider} command failed with exit code {exit_code}: {tail}")
-    }
+fn command_failed_message(provider: &str, exit_code: i32) -> String {
+    format!("{provider} command failed with exit code {exit_code}")
 }
 
 fn cancelled_before_launch() -> AgentError {
@@ -711,18 +694,13 @@ fn map_query_error(
     result: &QueryResult,
     preassigned_session: Option<&SessionHandle>,
 ) -> AgentError {
-    let kind = match result.extra.get("subtype").and_then(|value| value.as_str()) {
-        Some("error_max_turns") => ErrorKind::Limit,
-        Some("error_max_budget_usd") => ErrorKind::Budget,
-        _ => ErrorKind::Provider,
+    let (kind, message) = match result.extra.get("subtype").and_then(|value| value.as_str()) {
+        Some("error_max_turns") => (ErrorKind::Limit, "Claude reached its maximum turn limit"),
+        Some("error_max_budget_usd") => (ErrorKind::Budget, "Claude reached its budget limit"),
+        _ => (ErrorKind::Provider, "Claude reported a failed turn"),
     };
-    AgentError::new(
-        kind,
-        result.result.clone(),
-        FailurePhase::Running,
-        EffectState::Possible,
-    )
-    .with_evidence(query_evidence(result, preassigned_session))
+    AgentError::new(kind, message, FailurePhase::Running, EffectState::Possible)
+        .with_evidence(query_evidence(result, preassigned_session))
 }
 
 fn attach_preassigned_session(
@@ -738,10 +716,10 @@ fn attach_preassigned_session(
     error
 }
 
-fn launch_error(message: impl Into<String>) -> AgentError {
+fn launch_error() -> AgentError {
     AgentError::new(
         ErrorKind::Provider,
-        message,
+        "Claude could not be initialized",
         FailurePhase::Launch,
         EffectState::None,
     )
@@ -870,21 +848,21 @@ fn map_other_wrapper_error(error: claude_wrapper::Error) -> AgentError {
             FailurePhase::Admission,
             EffectState::None,
         ),
-        Error::VersionMismatch { found, minimum } => (
+        Error::VersionMismatch { .. } => (
             ErrorKind::Unsupported,
-            format!("Claude CLI {found} is older than required version {minimum}"),
+            "Claude CLI is older than the required version".to_string(),
             FailurePhase::Launch,
             EffectState::None,
         ),
         Error::Io { message, .. } if message.starts_with("failed to spawn claude") => (
             ErrorKind::Provider,
-            format!("Claude process launch failed: {message}"),
+            "Claude process could not be launched".to_string(),
             FailurePhase::Launch,
             EffectState::None,
         ),
-        Error::Io { message, .. } => (
+        Error::Io { .. } => (
             ErrorKind::Provider,
-            format!("Claude process I/O failed: {message}"),
+            "Claude process I/O failed".to_string(),
             FailurePhase::Running,
             EffectState::Possible,
         ),
@@ -894,11 +872,9 @@ fn map_other_wrapper_error(error: claude_wrapper::Error) -> AgentError {
             FailurePhase::Settlement,
             EffectState::Possible,
         ),
-        Error::CommandFailed {
-            exit_code, stderr, ..
-        } => (
+        Error::CommandFailed { exit_code, .. } => (
             ErrorKind::Provider,
-            command_failed_message("Claude", exit_code, &stderr),
+            command_failed_message("Claude", exit_code),
             FailurePhase::Running,
             EffectState::Possible,
         ),
@@ -1315,10 +1291,11 @@ mod tests {
 
     #[test]
     fn terminal_error_retains_session_and_accounting_evidence() {
+        const RESULT_SENTINEL: &str = "provider-result-secret";
         let mut extra = std::collections::HashMap::new();
         extra.insert("subtype".into(), serde_json::json!("error_max_budget_usd"));
         let result = QueryResult {
-            result: "maximum budget reached".into(),
+            result: RESULT_SENTINEL.into(),
             session_id: "session-1".into(),
             cost_usd: Some(1.0),
             duration_ms: Some(12),
@@ -1335,6 +1312,8 @@ mod tests {
         let error = map_query_error(&result, None);
         let evidence = error.evidence.as_deref().expect("failure evidence");
         assert_eq!(error.kind, ErrorKind::Budget);
+        assert_eq!(error.message, "Claude reached its budget limit");
+        assert!(!format!("{error:?}").contains(RESULT_SENTINEL));
         assert_eq!(evidence.cost, Some(Cost::usd(1.0)));
         assert_eq!(evidence.provider_turns, Some(2));
         assert_eq!(evidence.duration, Some(Duration::from_millis(12)));
@@ -1389,6 +1368,52 @@ mod tests {
             assert_eq!(error.effects, EffectState::Possible);
             assert!(!error.message.contains("private-session"));
         }
+    }
+
+    #[test]
+    fn provider_diagnostics_do_not_cross_the_public_error_surface() {
+        const DIAGNOSTIC_SENTINEL: &str = "provider-diagnostic-secret";
+        const SESSION_SENTINEL: &str = "a1111111-1111-4111-8111-111111111111";
+        let assert_redacted = |error: &AgentError| {
+            let rendered = format!("{error:?}");
+            assert!(!error.message.contains(DIAGNOSTIC_SENTINEL));
+            assert!(!error.message.contains(SESSION_SENTINEL));
+            assert!(!rendered.contains(DIAGNOSTIC_SENTINEL));
+            assert!(!rendered.contains(SESSION_SENTINEL));
+            assert!(!rendered.contains("private-working-directory"));
+        };
+
+        let command = claude_wrapper::Error::from_command_failure(
+            format!("claude --resume {SESSION_SENTINEL}"),
+            37,
+            format!("stdout {DIAGNOSTIC_SENTINEL}"),
+            format!("stderr {DIAGNOSTIC_SENTINEL} {SESSION_SENTINEL}"),
+            Some(PathBuf::from("/private-working-directory")),
+        );
+        let command = map_wrapper_error(command);
+        assert_eq!(command.message, "Claude command failed with exit code 37");
+        assert_redacted(&command);
+
+        let io = map_wrapper_error(claude_wrapper::Error::Io {
+            message: format!("stream failed: {DIAGNOSTIC_SENTINEL} {SESSION_SENTINEL}"),
+            source: std::io::Error::other(format!(
+                "source {DIAGNOSTIC_SENTINEL} {SESSION_SENTINEL}"
+            )),
+            working_dir: Some(PathBuf::from("/private-working-directory")),
+        });
+        assert_eq!(io.message, "Claude process I/O failed");
+        assert_eq!(io.phase, FailurePhase::Running);
+        assert_redacted(&io);
+
+        let launch = map_wrapper_error(claude_wrapper::Error::Io {
+            message: format!("failed to spawn claude: {DIAGNOSTIC_SENTINEL} {SESSION_SENTINEL}"),
+            source: std::io::Error::other(DIAGNOSTIC_SENTINEL),
+            working_dir: Some(PathBuf::from("/private-working-directory")),
+        });
+        assert_eq!(launch.message, "Claude process could not be launched");
+        assert_eq!(launch.phase, FailurePhase::Launch);
+        assert_eq!(launch.effects, EffectState::None);
+        assert_redacted(&launch);
     }
 
     #[cfg(unix)]
