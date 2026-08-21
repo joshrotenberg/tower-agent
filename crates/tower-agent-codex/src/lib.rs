@@ -26,9 +26,9 @@ use codex_wrapper::command::exec::ExecResumeCommand;
 use codex_wrapper::{Codex, ExecCommand, QueryResult, SandboxMode};
 use tower::Service;
 use tower_agent::{
-    AgentError, AgentEvent, AgentRequest, AuthorityPolicy, CancellationToken, EffectState,
-    ErrorKind, FailurePhase, FilesystemAuthority, RequestsFilesystemAuthority, SessionHandle,
-    TokenUsage, Turn, TurnOutcome,
+    AgentError, AgentEvent, AgentRequest, AuthorityPolicy, CancellationToken,
+    ChildEnvironmentPolicy, EffectState, ErrorKind, FailurePhase, FilesystemAuthority,
+    RequestsFilesystemAuthority, SessionHandle, TokenUsage, Turn, TurnOutcome,
 };
 
 const PROVIDER: &str = "codex";
@@ -69,6 +69,7 @@ pub struct CodexService {
     codex_home: Option<PathBuf>,
     termination_grace: Option<Duration>,
     authority_policy: AuthorityPolicy,
+    child_environment: ChildEnvironmentPolicy,
 }
 
 impl CodexService {
@@ -79,6 +80,7 @@ impl CodexService {
             codex_home: None,
             termination_grace: None,
             authority_policy: AuthorityPolicy::read_only(),
+            child_environment: ChildEnvironmentPolicy::default(),
         }
     }
 
@@ -113,12 +115,35 @@ impl CodexService {
         &self.authority_policy
     }
 
+    /// Set the host-owned child environment policy. The compatibility default
+    /// inherits the complete host environment.
+    pub fn with_child_environment_policy(mut self, policy: ChildEnvironmentPolicy) -> Self {
+        self.child_environment = policy;
+        self
+    }
+
+    pub const fn child_environment_policy(&self) -> &ChildEnvironmentPolicy {
+        &self.child_environment
+    }
+
     pub fn codex_home(&self) -> Option<&Path> {
         self.codex_home.as_deref()
     }
 
     fn build_codex(&self, working_directory: Option<&Path>) -> Result<Codex, AgentError> {
         let mut builder = Codex::builder();
+        let environment = self.child_environment.resolve().map_err(|error| {
+            AgentError::new(
+                ErrorKind::Internal,
+                format!("invalid Codex child environment policy: {error}"),
+                FailurePhase::Launch,
+                EffectState::None,
+            )
+        })?;
+        if environment.clear_inherited() {
+            builder = builder.clear_env();
+        }
+        builder = builder.envs(environment.variables());
         if let Some(binary) = &self.binary {
             builder = builder.binary(binary);
         }
@@ -519,6 +544,49 @@ mod tests {
 
     fn request(prompt: &str, options: CodexOptions) -> AgentRequest<Turn<CodexOptions>> {
         AgentRequest::new(Turn::new(prompt).with_options(options))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clear_child_environment_keeps_only_allowed_and_explicit_values() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-environment-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "[ -z \"${HOME+x}\" ] || exit 91\n",
+                "[ -n \"$PATH\" ] || exit 92\n",
+                "[ \"$TOWER_AGENT_EXPLICIT\" = \"visible\" ] || exit 93\n",
+                "[ \"$CODEX_HOME\" = \"/host/codex\" ] || exit 94\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ok\"}}'\n",
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+            ),
+        )
+        .expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let policy = ChildEnvironmentPolicy::clear()
+            .allow_ambient("PATH")
+            .with_variable("TOWER_AGENT_EXPLICIT", "visible");
+        let outcome = CodexService::new()
+            .with_binary(&path)
+            .with_codex_home("/host/codex")
+            .with_child_environment_policy(policy)
+            .oneshot(request("hello", CodexOptions::default()))
+            .await
+            .expect("filtered child environment reaches Codex");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(outcome.output, "ok");
     }
 
     #[test]
