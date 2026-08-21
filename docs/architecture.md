@@ -240,6 +240,13 @@ workspace files or child environment variables; compose them with filesystem
 authority and `ChildEnvironmentPolicy` where the provider supports those
 boundaries.
 
+Claude adapter errors expose fixed category-based messages. Provider result
+text, stderr, wrapper I/O details, command arguments, working directories, and
+session handles are not copied into `AgentError.message` or tracing. Raw child
+diagnostics are discarded by default; any future diagnostic observer must be
+an explicit host-private, sensitive-data policy rather than part of the
+portable error surface.
+
 ## Middleware opportunities
 
 ### Filesystem authority
