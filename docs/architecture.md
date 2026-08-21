@@ -117,6 +117,33 @@ The host owns launch configuration such as provider home and configuration
 directories. Portable request bodies do not carry ambient credentials or
 provider-private launch context.
 
+### Child process environment
+
+`ChildEnvironmentPolicy` is host-owned and shared by both provider services.
+Its compatibility default inherits the worker's complete environment. The
+clear mode removes every ambient variable, then copies only named allowlisted
+variables and applies explicit entries. Explicit values are redacted from
+`Debug`, errors, and events; invalid keys, NUL-containing values, and
+non-Unicode allowlisted values are refused before launch.
+
+A queued or server host should begin with `ChildEnvironmentPolicy::clear()` and
+add only what its deployment proves necessary:
+
+- `PATH` when the provider or its tools resolve executables by name;
+- locale variables such as `LANG` or `LC_ALL` when their behavior matters;
+- exactly one intended authentication path: for example
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` for Claude, or one of
+  `OPENAI_API_KEY`, `CODEX_API_KEY`, or `CODEX_ACCESS_TOKEN` for Codex;
+- cloud-provider variables only when intentionally using Bedrock or Vertex;
+- an isolated provider configuration directory when using stored login state.
+
+`ClaudeService::with_config_directory` and `CodexService::with_codex_home` are
+applied after the policy and therefore remain explicit under a cleared
+environment. Nothing automatically preserves `HOME`; retain it only when the
+chosen authentication or tool path truly requires the ambient home. This is a
+direct-child environment boundary, not an OS sandbox: a same-UID child may
+still inspect files, sockets, or process metadata allowed by the platform.
+
 ## Middleware opportunities
 
 ### Filesystem authority

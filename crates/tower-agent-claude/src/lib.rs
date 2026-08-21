@@ -24,8 +24,8 @@ use claude_wrapper::types::QueryResult;
 use claude_wrapper::{Claude, Effort, HermeticScope, QueryCommand};
 use tower::Service;
 use tower_agent::{
-    AgentError, AgentEvent, AgentRequest, Cost, EffectState, ErrorKind, FailureEvidence,
-    FailurePhase, SessionHandle, TokenUsage, Turn, TurnOutcome,
+    AgentError, AgentEvent, AgentRequest, ChildEnvironmentPolicy, Cost, EffectState, ErrorKind,
+    FailureEvidence, FailurePhase, SessionHandle, TokenUsage, Turn, TurnOutcome,
 };
 
 const PROVIDER: &str = "claude";
@@ -128,6 +128,7 @@ pub struct ClaudeService {
     binary: Option<PathBuf>,
     config_directory: Option<PathBuf>,
     kill_grace: Option<Duration>,
+    child_environment: ChildEnvironmentPolicy,
 }
 
 impl ClaudeService {
@@ -137,6 +138,7 @@ impl ClaudeService {
             binary: None,
             config_directory: None,
             kill_grace: None,
+            child_environment: ChildEnvironmentPolicy::default(),
         }
     }
 
@@ -159,12 +161,35 @@ impl ClaudeService {
         self
     }
 
+    /// Set the host-owned child environment policy. The compatibility default
+    /// inherits the complete host environment.
+    pub fn with_child_environment_policy(mut self, policy: ChildEnvironmentPolicy) -> Self {
+        self.child_environment = policy;
+        self
+    }
+
+    pub const fn child_environment_policy(&self) -> &ChildEnvironmentPolicy {
+        &self.child_environment
+    }
+
     fn build_claude(
         &self,
         working_directory: Option<&Path>,
         config_directory: Option<&Path>,
     ) -> Result<Claude, AgentError> {
         let mut builder = Claude::builder();
+        let environment = self.child_environment.resolve().map_err(|error| {
+            AgentError::new(
+                ErrorKind::Internal,
+                format!("invalid Claude child environment policy: {error}"),
+                FailurePhase::Launch,
+                EffectState::None,
+            )
+        })?;
+        if environment.clear_inherited() {
+            builder = builder.clear_env();
+        }
+        builder = builder.envs(environment.variables());
         if let Some(binary) = &self.binary {
             builder = builder.binary(binary);
         }
@@ -659,6 +684,49 @@ fn map_other_wrapper_error(error: claude_wrapper::Error) -> AgentError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clear_child_environment_keeps_only_allowed_and_explicit_values() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-environment-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "[ -z \"${HOME+x}\" ] || exit 91\n",
+                "[ -n \"$PATH\" ] || exit 92\n",
+                "[ \"$TOWER_AGENT_EXPLICIT\" = \"visible\" ] || exit 93\n",
+                "[ \"$CLAUDE_CONFIG_DIR\" = \"/host/claude\" ] || exit 94\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"s\",\"is_error\":false}'\n",
+            ),
+        )
+        .expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let policy = ChildEnvironmentPolicy::clear()
+            .allow_ambient("PATH")
+            .with_variable("TOWER_AGENT_EXPLICIT", "visible");
+        let outcome = ClaudeService::new()
+            .with_binary(&path)
+            .with_config_directory("/host/claude")
+            .with_child_environment_policy(policy)
+            .oneshot(AgentRequest::new(
+                Turn::new("hello").with_options(ClaudeOptions::default()),
+            ))
+            .await
+            .expect("filtered child environment reaches Claude");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(outcome.output, "ok");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn strict_mcp_config_reaches_the_cli_argv() {
