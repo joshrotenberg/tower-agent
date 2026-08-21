@@ -142,6 +142,11 @@ The host owns launch configuration such as provider home and configuration
 directories. Portable request bodies do not carry ambient credentials or
 provider-private launch context.
 
+Session handles remain provider-tagged opaque values, but both native adapters
+reject a resumed handle beginning with `-` before launch. This ensures a raw
+handle, whether supplied by a caller or retained from provider evidence, cannot
+be reinterpreted as a Claude or Codex CLI option.
+
 ### Host-preassigned sessions
 
 `CallContext::with_preassigned_session` lets a durable host reserve a

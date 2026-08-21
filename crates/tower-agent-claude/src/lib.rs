@@ -348,6 +348,18 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
                 ))
             });
         }
+        if request
+            .body
+            .session
+            .as_ref()
+            .is_some_and(|session| session.value().starts_with('-'))
+        {
+            return Box::pin(async {
+                Err(AgentError::invalid_request(
+                    "Claude session handle must not begin with a hyphen",
+                ))
+            });
+        }
         let preassigned_session = match validate_preassigned_session(&request) {
             Ok(session) => session,
             Err(error) => return Box::pin(async move { Err(error) }),
@@ -1186,6 +1198,24 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Unsupported);
         assert_eq!(error.phase, FailurePhase::Validation);
         assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[tokio::test]
+    async fn rejects_flag_shaped_resume_handles_before_launch() {
+        for handle in ["--continue", "-c"] {
+            let turn = Turn::new("hello")
+                .resume(SessionHandle::new(PROVIDER, handle))
+                .with_options(ClaudeOptions::default());
+            let error = ClaudeService::new()
+                .with_binary("/definitely/not/a/claude/binary")
+                .oneshot(AgentRequest::new(turn))
+                .await
+                .expect_err("flag-shaped session must be rejected");
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
+            assert_eq!(error.phase, FailurePhase::Validation);
+            assert_eq!(error.effects, EffectState::None);
+            assert!(!error.message.contains(handle));
+        }
     }
 
     #[tokio::test]

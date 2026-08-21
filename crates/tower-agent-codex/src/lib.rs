@@ -413,6 +413,11 @@ fn prepare(
                 "Codex session handle must not be empty",
             ));
         }
+        Some(session) if session.value().starts_with('-') => {
+            return Err(AgentError::invalid_request(
+                "Codex session handle must not begin with a hyphen",
+            ));
+        }
         Some(session) => Some(session.value().to_string()),
         None => None,
     };
@@ -1249,6 +1254,25 @@ mod tests {
 
         assert_eq!(error.kind, ErrorKind::Unsupported);
         assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[tokio::test]
+    async fn flag_shaped_resume_handles_are_rejected_before_launch() {
+        for handle in ["--last", "-l"] {
+            let turn = Turn::new("continue")
+                .with_options(CodexOptions::default())
+                .resume(SessionHandle::new(PROVIDER, handle));
+            let error = CodexService::new()
+                .with_binary("/definitely/not/a/codex/binary")
+                .oneshot(AgentRequest::new(turn))
+                .await
+                .expect_err("flag-shaped session must be rejected");
+
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
+            assert_eq!(error.phase, FailurePhase::Validation);
+            assert_eq!(error.effects, EffectState::None);
+            assert!(!error.message.contains(handle));
+        }
     }
 
     #[tokio::test]
