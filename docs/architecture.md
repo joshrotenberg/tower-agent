@@ -89,15 +89,40 @@ The request cancellation token is cooperative at the kernel boundary. Provider
 services must observe it while work is in flight. `DeadlineLayer` never drops
 the provider future itself: it signals cancellation and waits for settlement.
 
-Claude wrapper 0.14.2 and Codex wrapper 0.4.1 put each invocation in its own
-process group on Unix. The adapters pass request cancellation into the wrappers'
-high-level JSON paths. Explicit cancellation, timeout, and stdin failures await
-group termination and direct-child reaping before returning terminal settlement.
-On platforms without process groups, cleanup awaits the direct child but cannot
-guarantee ownership of descendants. Dropping a wrapper future remains an
-immediate kill path because destructors cannot await; `SuperviseLayer` retains
-provider work after caller drop so normal Tower composition reaches the awaited
-settlement path.
+Claude wrapper 0.14.2 and the pinned Codex wrapper revision put each invocation
+in its own process group on Unix. The adapters pass request cancellation into
+the wrappers' high-level JSON paths. Explicit cancellation, timeout, and stdin
+failures await group termination and direct-child reaping before returning
+terminal settlement. On platforms without process groups, cleanup awaits the
+direct child but cannot guarantee ownership of descendants. Dropping a wrapper
+future remains an immediate kill path because destructors cannot await;
+`SuperviseLayer` retains provider work after caller drop so normal Tower
+composition reaches the awaited settlement path.
+
+Cancellation ownership does not cover abrupt worker death because `SIGKILL`, a
+container crash, and similar failures run no Rust destructor. Both provider
+services therefore expose two host-owned controls:
+
+- `with_die_with_parent(true)` asks Linux to apply `PR_SET_PDEATHSIG` with a
+  post-arm parent check, so the kernel kills the direct provider child when its
+  immediate worker dies;
+- `with_spawn_observer` reports a `SpawnReceipt` before provider output, with
+  provider and operation identity plus the direct child pid and its owned
+  process-group id, so a durable host can register external cleanup against
+  the correct lease or job.
+
+`ClaudeService::die_with_parent_supported` and
+`CodexService::die_with_parent_supported` report the platform guarantee. It is
+true only on Linux. macOS, Windows, and other targets require a watchdog that
+persists and reconciles spawn receipts. The observer itself must not block; use
+a nonblocking channel or bounded local write from the callback.
+
+Parent-death signaling covers the direct provider child, and process-group
+identity gives a watchdog the wider run boundary on Unix. Neither mechanism
+makes the provider operation exactly once. A crash can happen after an external
+effect but before terminal settlement or queue acknowledgement, so durable
+hosts must still assume at-least-once delivery and prevent automatic replay
+when effect state is possible.
 
 ## Provider boundaries
 

@@ -11,6 +11,8 @@
 //! settlement follows process-group termination and direct-child reaping. On
 //! non-Unix platforms, cleanup awaits the direct child but cannot guarantee
 //! ownership of its descendants.
+//! Abrupt worker death is separate: hosts can enable Linux parent-death
+//! signaling and register [`SpawnReceipt`] values with an external watchdog.
 //!
 //! Filesystem authority is portable rather than a wrapper flag. Each turn asks
 //! for a [`FilesystemAuthority`], while [`CodexService`] enforces a host-owned
@@ -25,6 +27,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -33,8 +36,9 @@ use codex_wrapper::{Codex, ExecCommand, QueryResult, SandboxMode};
 use tower::Service;
 use tower_agent::{
     AgentError, AgentEvent, AgentRequest, AuthorityPolicy, CancellationToken,
-    ChildEnvironmentPolicy, EffectState, ErrorKind, FailurePhase, FilesystemAuthority,
-    RequestsFilesystemAuthority, SessionHandle, TokenUsage, Turn, TurnOutcome,
+    ChildEnvironmentPolicy, EffectState, ErrorKind, FailurePhase, FilesystemAuthority, OperationId,
+    RequestsFilesystemAuthority, SessionHandle, SpawnObserver, SpawnReceipt, TokenUsage, Turn,
+    TurnOutcome,
 };
 
 const PROVIDER: &str = "codex";
@@ -89,6 +93,8 @@ pub struct CodexService {
     binary: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     termination_grace: Option<Duration>,
+    die_with_parent: bool,
+    spawn_observer: Option<SpawnObserver>,
     authority_policy: AuthorityPolicy,
     child_environment: ChildEnvironmentPolicy,
     ambient_context: CodexAmbientContextPolicy,
@@ -101,6 +107,8 @@ impl CodexService {
             binary: None,
             codex_home: None,
             termination_grace: None,
+            die_with_parent: false,
+            spawn_observer: None,
             authority_policy: AuthorityPolicy::read_only(),
             child_environment: ChildEnvironmentPolicy::default(),
             ambient_context: CodexAmbientContextPolicy::default(),
@@ -123,6 +131,33 @@ impl CodexService {
     /// Codex process group to stop.
     pub fn with_termination_grace(mut self, duration: Duration) -> Self {
         self.termination_grace = Some(duration);
+        self
+    }
+
+    /// Ask Linux to kill each Codex child when this worker process dies.
+    ///
+    /// This is host-owned and off by default. Other platforms accept the
+    /// setting but need an external watchdog driven by
+    /// [`with_spawn_observer`](Self::with_spawn_observer).
+    pub fn with_die_with_parent(mut self, enabled: bool) -> Self {
+        self.die_with_parent = enabled;
+        self
+    }
+
+    pub const fn die_with_parent(&self) -> bool {
+        self.die_with_parent
+    }
+
+    /// Whether the configured parent-death policy has kernel support here.
+    pub const fn die_with_parent_supported() -> bool {
+        codex_wrapper::exec::die_with_parent_supported()
+    }
+
+    /// Register each spawned Codex child with a host-local watchdog.
+    ///
+    /// The observer runs inline at spawn time and must not block.
+    pub fn with_spawn_observer(mut self, observer: SpawnObserver) -> Self {
+        self.spawn_observer = Some(observer);
         self
     }
 
@@ -164,7 +199,11 @@ impl CodexService {
         self.codex_home.as_deref()
     }
 
-    fn build_codex(&self, working_directory: Option<&Path>) -> Result<Codex, AgentError> {
+    fn build_codex(
+        &self,
+        working_directory: Option<&Path>,
+        operation_id: OperationId,
+    ) -> Result<Codex, AgentError> {
         let mut builder = Codex::builder();
         let environment = self.child_environment.resolve().map_err(|error| {
             AgentError::new(
@@ -198,6 +237,18 @@ impl CodexService {
         if let Some(duration) = self.termination_grace {
             builder = builder.termination_grace(duration);
         }
+        builder = builder.die_with_parent(self.die_with_parent);
+        if let Some(observer) = &self.spawn_observer {
+            let observer = observer.clone();
+            builder = builder.on_spawn(Arc::new(move |info| {
+                observer.observe(SpawnReceipt::new(
+                    PROVIDER,
+                    operation_id,
+                    info.pid,
+                    info.pgid,
+                ));
+            }));
+        }
         builder.build().map_err(map_launch_error)
     }
 }
@@ -221,6 +272,7 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
     fn call(&mut self, request: AgentRequest<Turn<CodexOptions>>) -> Self::Future {
         let service = self.clone();
         let observer = request.context.events().clone();
+        let operation_id = request.context.operation_id();
         let prepared = prepare(request, &self.authority_policy);
 
         Box::pin(async move {
@@ -230,7 +282,7 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             }
 
             let started = Instant::now();
-            let codex = service.build_codex(turn.working_directory.as_deref())?;
+            let codex = service.build_codex(turn.working_directory.as_deref(), operation_id)?;
 
             if cancellation.is_cancelled() {
                 return Err(cancelled_before_launch());
@@ -950,6 +1002,136 @@ mod tests {
             outcome.session.as_ref().map(SessionHandle::value),
             Some("thread-1")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_observer_receives_the_owned_codex_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-spawn-receipt-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n",
+                "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n",
+                "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+            ),
+        )
+        .expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let service = CodexService::new()
+            .with_binary(&path)
+            .with_die_with_parent(true)
+            .with_spawn_observer(SpawnObserver::new(move |receipt| {
+                sender.send(receipt).unwrap();
+            }));
+        assert!(service.die_with_parent());
+        assert_eq!(
+            CodexService::die_with_parent_supported(),
+            cfg!(target_os = "linux")
+        );
+
+        service
+            .oneshot(AgentRequest::with_context(
+                Turn::new("hello").with_options(CodexOptions::default()),
+                CallContext::new().with_operation_id(OperationId::from_u64(63)),
+            ))
+            .await
+            .expect("fake Codex run succeeds");
+        let _ = std::fs::remove_file(path);
+
+        let receipt = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn receipt delivered");
+        assert_eq!(receipt.provider, PROVIDER);
+        assert_eq!(receipt.operation_id, OperationId::from_u64(63));
+        assert!(receipt.pid > 0);
+        assert_eq!(receipt.process_group_id, Some(receipt.pid));
+    }
+
+    #[cfg(unix)]
+    const CODEX_PDEATHSIG_HELPER: &str = "TOWER_AGENT_CODEX_PDEATHSIG_HELPER";
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_pdeathsig_helper_process() {
+        if std::env::var(CODEX_PDEATHSIG_HELPER).is_err() {
+            return;
+        }
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-pdeathsig-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(&path, "#!/bin/sh\ncat >/dev/null\nexec /bin/sleep 300\n")
+            .expect("write blocking fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let service = CodexService::new()
+            .with_binary(&path)
+            .with_die_with_parent(true)
+            .with_spawn_observer(SpawnObserver::new(|receipt| {
+                println!("PID {}", receipt.pid);
+                let _ = std::io::stdout().flush();
+            }));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = runtime.block_on(service.oneshot(request("hello", CodexOptions::default())));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn codex_child_dies_when_the_worker_is_sigkilled() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let mut helper = Command::new(std::env::current_exe().expect("test binary path"))
+            .args([
+                "--exact",
+                "tests::codex_pdeathsig_helper_process",
+                "--nocapture",
+            ])
+            .env(CODEX_PDEATHSIG_HELPER, "1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn Codex worker helper");
+        let pid = BufReader::new(helper.stdout.take().expect("piped stdout"))
+            .lines()
+            .map_while(std::result::Result::ok)
+            .find_map(|line| line.strip_prefix("PID ").and_then(|pid| pid.parse().ok()))
+            .expect("helper reported provider pid");
+
+        helper.kill().expect("SIGKILL the Codex worker helper");
+        let _ = helper.wait();
+
+        for _ in 0..50 {
+            let output = Command::new("ps")
+                .args(["-o", "state=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps is available");
+            let state = String::from_utf8_lossy(&output.stdout);
+            if state.trim().is_empty() || state.trim().starts_with('Z') {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("Codex child {pid} survived its SIGKILLed worker");
     }
 
     #[cfg(unix)]

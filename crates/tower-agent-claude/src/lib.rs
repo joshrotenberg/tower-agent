@@ -13,6 +13,8 @@
 //! before returning a terminal cancellation result. Timeout and stdin setup
 //! failures use the same ownership path. On non-Unix platforms, cleanup awaits
 //! the direct child but cannot guarantee ownership of its descendants.
+//! Abrupt worker death is separate: hosts can enable Linux parent-death
+//! signaling and register [`SpawnReceipt`] values with an external watchdog.
 //!
 //! [`ClaudeAmbientContext`] keeps inherited, setting-source hermetic, safe, and
 //! bare modes distinct. The service can require a host-owned baseline that a
@@ -22,6 +24,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -30,7 +33,8 @@ use claude_wrapper::{Claude, Effort, HermeticScope, QueryCommand};
 use tower::Service;
 use tower_agent::{
     AgentError, AgentEvent, AgentRequest, ChildEnvironmentPolicy, Cost, EffectState, ErrorKind,
-    FailureEvidence, FailurePhase, SessionHandle, TokenUsage, Turn, TurnOutcome,
+    FailureEvidence, FailurePhase, OperationId, SessionHandle, SpawnObserver, SpawnReceipt,
+    TokenUsage, Turn, TurnOutcome,
 };
 
 const PROVIDER: &str = "claude";
@@ -148,6 +152,8 @@ pub struct ClaudeService {
     binary: Option<PathBuf>,
     config_directory: Option<PathBuf>,
     kill_grace: Option<Duration>,
+    die_with_parent: bool,
+    spawn_observer: Option<SpawnObserver>,
     child_environment: ChildEnvironmentPolicy,
     ambient_context: ClaudeAmbientContext,
 }
@@ -159,6 +165,8 @@ impl ClaudeService {
             binary: None,
             config_directory: None,
             kill_grace: None,
+            die_with_parent: false,
+            spawn_observer: None,
             child_environment: ChildEnvironmentPolicy::default(),
             ambient_context: ClaudeAmbientContext::default(),
         }
@@ -180,6 +188,33 @@ impl ClaudeService {
     /// process group to stop.
     pub fn with_kill_grace(mut self, duration: Duration) -> Self {
         self.kill_grace = Some(duration);
+        self
+    }
+
+    /// Ask Linux to kill each Claude child when this worker process dies.
+    ///
+    /// This is host-owned and off by default. Other platforms accept the
+    /// setting but need an external watchdog driven by
+    /// [`with_spawn_observer`](Self::with_spawn_observer).
+    pub fn with_die_with_parent(mut self, enabled: bool) -> Self {
+        self.die_with_parent = enabled;
+        self
+    }
+
+    pub const fn die_with_parent(&self) -> bool {
+        self.die_with_parent
+    }
+
+    /// Whether the configured parent-death policy has kernel support here.
+    pub const fn die_with_parent_supported() -> bool {
+        claude_wrapper::exec::die_with_parent_supported()
+    }
+
+    /// Register each spawned Claude child with a host-local watchdog.
+    ///
+    /// The observer runs inline at spawn time and must not block.
+    pub fn with_spawn_observer(mut self, observer: SpawnObserver) -> Self {
+        self.spawn_observer = Some(observer);
         self
     }
 
@@ -210,6 +245,7 @@ impl ClaudeService {
         &self,
         working_directory: Option<&Path>,
         config_directory: Option<&Path>,
+        operation_id: OperationId,
     ) -> Result<Claude, AgentError> {
         let mut builder = Claude::builder();
         let environment = self.child_environment.resolve().map_err(|error| {
@@ -243,6 +279,18 @@ impl ClaudeService {
         }
         if let Some(duration) = self.kill_grace {
             builder = builder.kill_grace(duration);
+        }
+        builder = builder.die_with_parent(self.die_with_parent);
+        if let Some(observer) = &self.spawn_observer {
+            let observer = observer.clone();
+            builder = builder.on_spawn(Arc::new(move |info| {
+                observer.observe(SpawnReceipt::new(
+                    PROVIDER,
+                    operation_id,
+                    info.pid,
+                    info.pgid,
+                ));
+            }));
         }
         builder
             .build()
@@ -312,9 +360,11 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
             Ok(query) => query,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
+        let operation_id = request.context.operation_id();
         let claude = match self.build_claude(
             request.body.working_directory.as_deref(),
             self.config_directory.as_deref(),
+            operation_id,
         ) {
             Ok(claude) => claude,
             Err(error) => return Box::pin(async move { Err(error) }),
@@ -1172,6 +1222,135 @@ mod tests {
         assert_eq!(outcome.duration, Some(Duration::from_millis(12)));
         assert_eq!(outcome.provider_turns, Some(1));
         assert_eq!(receiver.recv().await, Some(AgentEvent::Started));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_observer_receives_the_owned_claude_process_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-spawn-receipt-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"session_id\":\"s\",\"is_error\":false}'\n",
+            ),
+        )
+        .expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let service = ClaudeService::new()
+            .with_binary(&path)
+            .with_die_with_parent(true)
+            .with_spawn_observer(SpawnObserver::new(move |receipt| {
+                sender.send(receipt).unwrap();
+            }));
+        assert!(service.die_with_parent());
+        assert_eq!(
+            ClaudeService::die_with_parent_supported(),
+            cfg!(target_os = "linux")
+        );
+
+        service
+            .oneshot(AgentRequest::with_context(
+                Turn::new("hello").with_options(ClaudeOptions::default()),
+                CallContext::new().with_operation_id(OperationId::from_u64(63)),
+            ))
+            .await
+            .expect("fake Claude run succeeds");
+        let _ = std::fs::remove_file(path);
+
+        let receipt = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn receipt delivered");
+        assert_eq!(receipt.provider, PROVIDER);
+        assert_eq!(receipt.operation_id, OperationId::from_u64(63));
+        assert!(receipt.pid > 0);
+        assert_eq!(receipt.process_group_id, Some(receipt.pid));
+    }
+
+    #[cfg(unix)]
+    const CLAUDE_PDEATHSIG_HELPER: &str = "TOWER_AGENT_CLAUDE_PDEATHSIG_HELPER";
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_pdeathsig_helper_process() {
+        if std::env::var(CLAUDE_PDEATHSIG_HELPER).is_err() {
+            return;
+        }
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-pdeathsig-{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(&path, "#!/bin/sh\ncat >/dev/null\nexec /bin/sleep 300\n")
+            .expect("write blocking fake Claude CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let service = ClaudeService::new()
+            .with_binary(&path)
+            .with_die_with_parent(true)
+            .with_spawn_observer(SpawnObserver::new(|receipt| {
+                println!("PID {}", receipt.pid);
+                let _ = std::io::stdout().flush();
+            }));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let request = AgentRequest::new(Turn::new("hello").with_options(ClaudeOptions::default()));
+        let _ = runtime.block_on(service.oneshot(request));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_child_dies_when_the_worker_is_sigkilled() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let mut helper = Command::new(std::env::current_exe().expect("test binary path"))
+            .args([
+                "--exact",
+                "tests::claude_pdeathsig_helper_process",
+                "--nocapture",
+            ])
+            .env(CLAUDE_PDEATHSIG_HELPER, "1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn Claude worker helper");
+        let pid = BufReader::new(helper.stdout.take().expect("piped stdout"))
+            .lines()
+            .map_while(std::result::Result::ok)
+            .find_map(|line| line.strip_prefix("PID ").and_then(|pid| pid.parse().ok()))
+            .expect("helper reported provider pid");
+
+        helper.kill().expect("SIGKILL the Claude worker helper");
+        let _ = helper.wait();
+
+        for _ in 0..50 {
+            let output = Command::new("ps")
+                .args(["-o", "state=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps is available");
+            let state = String::from_utf8_lossy(&output.stdout);
+            if state.trim().is_empty() || state.trim().starts_with('Z') {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("Claude child {pid} survived its SIGKILLed worker");
     }
 
     #[cfg(unix)]
