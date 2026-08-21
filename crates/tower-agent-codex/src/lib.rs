@@ -1111,7 +1111,7 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn Codex worker helper");
-        let pid = BufReader::new(helper.stdout.take().expect("piped stdout"))
+        let pid: u32 = BufReader::new(helper.stdout.take().expect("piped stdout"))
             .lines()
             .map_while(std::result::Result::ok)
             .find_map(|line| line.strip_prefix("PID ").and_then(|pid| pid.parse().ok()))
