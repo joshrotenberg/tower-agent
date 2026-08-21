@@ -207,6 +207,14 @@ persistence for fresh and resumed calls. The adapter omits `SessionHandle` from
 an ephemeral outcome even if the CLI emits a transient thread id, because that
 id does not prove the completed turn can be resumed.
 
+`CodexOptions::output_schema` carries parsed JSON rather than a caller-selected
+filesystem path. The adapter validates it against the JSON Schema Draft 2020-12
+meta-schema and enforces a 1 MiB serialized limit before launch. For both fresh
+and resumed calls it writes the schema to an owner-only temporary file, passes
+that path to Codex, retains the file through process settlement, and removes it
+on every return or dropped future. Option `Debug` output redacts the schema, and
+adapter errors never include its contents or temporary path.
+
 Claude exposes mutually exclusive `ClaudeAmbientContext` modes:
 
 | Mode | Provider behavior | Important residuals |

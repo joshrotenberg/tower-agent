@@ -16,7 +16,9 @@ tower-agent.workspace = true
 tower.workspace = true
 
 codex-wrapper.workspace = true
+jsonschema.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
