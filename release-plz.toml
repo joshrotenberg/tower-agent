@@ -37,3 +37,7 @@ release = false
 [[package]]
 name = "tower-agent-workflow"
 release = false
+
+[[package]]
+name = "apalis-local-example"
+release = false
