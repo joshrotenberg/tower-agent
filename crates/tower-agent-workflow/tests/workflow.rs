@@ -14,8 +14,9 @@ use std::{
 use tokio::sync::{Barrier, mpsc};
 use tower::{Service, ServiceExt, service_fn};
 use tower_agent::{
-    AgentError, AgentEvent, AgentRequest, EffectState, ErrorKind, EventObserver, FailurePhase,
-    FakeOptions, FakeService, Turn, TurnOutcome,
+    AgentError, AgentEvent, AgentRequest, Cost, EffectState, ErrorKind, EventObserver,
+    FailureEvidence, FailurePhase, FakeOptions, FakeService, FakeStep, SessionHandle, TokenUsage,
+    Turn, TurnOutcome,
 };
 use tower_agent_workflow::{
     AgentStepService, BoxStepService, DagBuilder, PipelineBuilder, StepCall, StepId, StepSpec,
@@ -115,6 +116,189 @@ async fn one_dispatcher_routes_distinct_typed_provider_options() {
         outcome.outputs[&step_id("fake")].usage.unwrap().output,
         Some(7)
     );
+}
+
+#[derive(Clone, Debug)]
+enum MetadataJob {
+    Produce,
+    Consume,
+}
+
+#[tokio::test]
+async fn exact_turn_outcome_metadata_survives_a_pipeline_dependency() {
+    let definition = PipelineBuilder::new("metadata", "v1")
+        .then(StepSpec::new("produce", MetadataJob::Produce))
+        .then(StepSpec::new("consume", MetadataJob::Consume))
+        .build()
+        .expect("pipeline is valid");
+    let expected = TurnOutcome {
+        output: "structured research".into(),
+        session: Some(SessionHandle::new("fake-metadata", "session-42")),
+        usage: Some(TokenUsage {
+            input: Some(11),
+            cached_input: Some(4),
+            cache_write_input: Some(2),
+            output: Some(7),
+            reasoning_output: Some(3),
+            provider_total: Some(27),
+        }),
+        cost: Some(Cost::usd(0.21)),
+        duration: Some(Duration::from_secs(9)),
+        provider_turns: Some(4),
+    };
+    let expected_for_dispatch = expected.clone();
+    let dispatcher = service_fn(move |call: StepCall<(), MetadataJob, TurnOutcome>| {
+        let expected = expected_for_dispatch.clone();
+        async move {
+            match call.job {
+                MetadataJob::Produce => {
+                    FakeService
+                        .oneshot(AgentRequest::with_context(
+                            Turn::new("produce metadata")
+                                .with_options(FakeOptions::succeed(expected)),
+                            call.agent_context(),
+                        ))
+                        .await
+                }
+                MetadataJob::Consume => {
+                    assert_eq!(call.dependencies.len(), 1);
+                    assert_eq!(call.dependencies[&step_id("produce")].as_ref(), &expected);
+                    FakeService
+                        .oneshot(AgentRequest::with_context(
+                            Turn::new("metadata observed").with_options(FakeOptions::succeed(
+                                TurnOutcome::new("metadata observed"),
+                            )),
+                            call.agent_context(),
+                        ))
+                        .await
+                }
+            }
+        }
+    });
+
+    let outcome = WorkflowService::<_, TurnOutcome, AgentError>::new(dispatcher)
+        .oneshot(WorkflowRequest::new(
+            WorkflowContext::new(run_id("run-metadata")),
+            definition,
+            (),
+        ))
+        .await
+        .expect("metadata pipeline succeeds");
+
+    assert_eq!(outcome.outputs[&step_id("produce")].as_ref(), &expected);
+    assert_eq!(
+        outcome.outputs[&step_id("consume")].output,
+        "metadata observed"
+    );
+}
+
+#[derive(Clone, Debug)]
+enum NamedSessionJob {
+    Preassign,
+    Resume,
+    WrongProvider,
+}
+
+#[tokio::test]
+async fn named_fake_threads_a_preassigned_session_and_rejects_wrong_provider_routing() {
+    let definition = PipelineBuilder::new("named-session", "v1")
+        .then(StepSpec::new("preassign", NamedSessionJob::Preassign))
+        .then(StepSpec::new("resume", NamedSessionJob::Resume))
+        .then(StepSpec::new(
+            "wrong-provider",
+            NamedSessionJob::WrongProvider,
+        ))
+        .build()
+        .expect("pipeline is valid");
+    let reserved = SessionHandle::new("fake-alpha", "host-reserved");
+    let reserved_for_dispatch = reserved.clone();
+    let alpha = FakeService::named("fake-alpha");
+    let beta = FakeService::named("fake-beta");
+    let dispatcher = service_fn(move |call: StepCall<(), NamedSessionJob, TurnOutcome>| {
+        let reserved = reserved_for_dispatch.clone();
+        let alpha = alpha.clone();
+        let beta = beta.clone();
+        async move {
+            match call.job {
+                NamedSessionJob::Preassign => {
+                    alpha
+                        .oneshot(AgentRequest::with_context(
+                            Turn::new("reserve a session").with_options(FakeOptions::default()),
+                            call.agent_context().with_preassigned_session(reserved),
+                        ))
+                        .await
+                }
+                NamedSessionJob::Resume => {
+                    let session = call.dependencies[&step_id("preassign")]
+                        .session
+                        .clone()
+                        .expect("preassigned session is returned");
+                    alpha
+                        .oneshot(AgentRequest::with_context(
+                            Turn::new("resume reserved session")
+                                .resume(session)
+                                .with_options(FakeOptions::default()),
+                            call.agent_context(),
+                        ))
+                        .await
+                }
+                NamedSessionJob::WrongProvider => {
+                    let alpha_session = call.dependencies[&step_id("resume")]
+                        .session
+                        .clone()
+                        .expect("resumed session is returned");
+                    beta.oneshot(AgentRequest::with_context(
+                        Turn::new("misrouted session")
+                            .resume(alpha_session)
+                            .with_options(FakeOptions::default()),
+                        call.agent_context(),
+                    ))
+                    .await
+                }
+            }
+        }
+    });
+
+    let failure = WorkflowService::<_, TurnOutcome, AgentError>::new(dispatcher)
+        .oneshot(WorkflowRequest::new(
+            WorkflowContext::new(run_id("run-named-session")),
+            definition,
+            (),
+        ))
+        .await
+        .expect_err("the wrong provider must reject the alpha session");
+
+    assert_eq!(failure.workflow_id().as_str(), "named-session");
+    assert_eq!(failure.workflow_version().as_str(), "v1");
+    assert_eq!(failure.run_id(), &run_id("run-named-session"));
+    match failure {
+        WorkflowFailure::StepsFailed {
+            completed,
+            failures,
+            ..
+        } => {
+            assert_eq!(completed.len(), 2);
+            assert_eq!(
+                completed[&step_id("preassign")].session.as_ref(),
+                Some(&reserved)
+            );
+            assert_eq!(
+                completed[&step_id("resume")].session.as_ref(),
+                Some(&reserved)
+            );
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].step_id, step_id("wrong-provider"));
+            let error = &failures[0].error;
+            assert_eq!(error.kind, ErrorKind::Unsupported);
+            assert_eq!(error.phase, FailurePhase::Validation);
+            assert_eq!(error.effects, EffectState::None);
+            assert!(error.message.contains("fake-alpha"));
+            assert!(error.message.contains("fake-beta"));
+            assert!(error.evidence.is_none());
+            assert!(error.cause.is_none());
+        }
+        other => panic!("unexpected failure: {other:?}"),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -429,27 +613,32 @@ async fn type_erased_dispatcher_runs_the_same_contract() {
 }
 
 #[tokio::test]
-async fn max_concurrency_is_a_hard_wave_bound() {
+async fn max_concurrency_is_hard_without_wave_blocking_newly_ready_work() {
     let definition = DagBuilder::new("bounded", "v1")
-        .step(StepSpec::new("a", ()))
-        .step(StepSpec::new("b", ()))
-        .step(StepSpec::new("c", ()))
+        .step(StepSpec::new("a-fast-root", ()))
+        .step(StepSpec::new("b-slow-root", ()))
+        .step(StepSpec::new("c-fast-child", ()).needs(["a-fast-root"]))
         .build()
         .expect("dag is valid");
     let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let release_fast_root = tower_agent::CancellationToken::new();
+    let release_slow_root = tower_agent::CancellationToken::new();
     let dispatcher = service_fn({
-        let release = Arc::clone(&release);
+        let release_fast_root = release_fast_root.clone();
+        let release_slow_root = release_slow_root.clone();
         move |call: StepCall<(), (), ()>| {
             let started_tx = started_tx.clone();
-            let release = Arc::clone(&release);
+            let release_fast_root = release_fast_root.clone();
+            let release_slow_root = release_slow_root.clone();
             async move {
-                started_tx.send(call.step_id).expect("receiver is alive");
-                release
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore is open")
-                    .forget();
+                let step_id = call.step_id;
+                started_tx.send(step_id.clone()).expect("receiver is alive");
+                match step_id.as_str() {
+                    "a-fast-root" => release_fast_root.cancelled().await,
+                    "b-slow-root" => release_slow_root.cancelled().await,
+                    "c-fast-child" => {}
+                    other => panic!("unexpected step: {other}"),
+                }
                 Ok::<_, Infallible>(())
             }
         }
@@ -477,7 +666,9 @@ async fn max_concurrency_is_a_hard_wave_bound() {
         [first, second]
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>(),
-        [step_id("a"), step_id("b")].into_iter().collect()
+        [step_id("a-fast-root"), step_id("b-slow-root")]
+            .into_iter()
+            .collect()
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(50), started_rx.recv())
@@ -486,15 +677,17 @@ async fn max_concurrency_is_a_hard_wave_bound() {
         "a third step crossed the concurrency boundary"
     );
 
-    release.add_permits(2);
+    // Release only the fast root. Its dependent child must use the newly
+    // available slot without waiting for the unrelated slow root.
+    release_fast_root.cancel();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
             .await
-            .expect("next wave should start")
+            .expect("newly available capacity should be used")
             .expect("sender is alive"),
-        step_id("c")
+        step_id("c-fast-child")
     );
-    release.add_permits(1);
+    release_slow_root.cancel();
     tokio::time::timeout(Duration::from_secs(2), execution)
         .await
         .expect("workflow should finish")
@@ -641,90 +834,156 @@ async fn agent_adapter_preserves_context_and_interrupts_inner_readiness() {
 enum ParallelFailureJob {
     Fail,
     AwaitCancellation,
-    LaterWave,
+    NotAdmittedAfterFailure,
 }
 
 #[tokio::test(start_paused = true)]
-async fn step_failure_cancels_called_siblings_and_is_not_reclassified_later() {
+async fn exact_failure_evidence_survives_while_a_scripted_sibling_is_drained() {
     let definition = DagBuilder::new("parallel-failure", "v1")
         .step(StepSpec::new("a-fail", ParallelFailureJob::Fail))
         .step(StepSpec::new(
             "b-await-cancellation",
             ParallelFailureJob::AwaitCancellation,
         ))
-        .step(StepSpec::new("z-later", ParallelFailureJob::LaterWave))
+        .step(StepSpec::new(
+            "z-not-admitted",
+            ParallelFailureJob::NotAdmittedAfterFailure,
+        ))
         .build()
         .expect("dag is valid");
-    let started = Arc::new(Barrier::new(2));
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (cancellation_seen_tx, mut cancellation_seen_rx) = mpsc::unbounded_channel();
+    let evidence = FailureEvidence {
+        session: Some(SessionHandle::new("fake", "reserved-session")),
+        usage: Some(TokenUsage {
+            input: Some(13),
+            output: Some(5),
+            provider_total: Some(18),
+            ..TokenUsage::default()
+        }),
+        cost: Some(Cost::usd(0.08)),
+        duration: Some(Duration::from_secs(3)),
+        provider_turns: Some(2),
+    };
+    let expected_failure = AgentError::new(
+        ErrorKind::Budget,
+        "scripted budget rail",
+        FailurePhase::Settlement,
+        EffectState::Reported,
+    )
+    .with_evidence(evidence);
+    let expected_for_dispatch = expected_failure.clone();
+    let fail_calls = Arc::new(AtomicUsize::new(0));
+    let sibling_calls = Arc::new(AtomicUsize::new(0));
+    let calls_after_failure = Arc::new(AtomicUsize::new(0));
+    let (observer, mut events) = EventObserver::channel(4);
+    let (cleanup_started_tx, mut cleanup_started_rx) = mpsc::unbounded_channel();
     let dispatcher = service_fn({
-        let started = Arc::clone(&started);
-        let calls = Arc::clone(&calls);
-        let cancellation_seen_tx = cancellation_seen_tx.clone();
-        move |call: StepCall<(), ParallelFailureJob, ()>| {
-            let started = Arc::clone(&started);
-            let calls = Arc::clone(&calls);
-            let cancellation_seen_tx = cancellation_seen_tx.clone();
+        let fail_calls = Arc::clone(&fail_calls);
+        let sibling_calls = Arc::clone(&sibling_calls);
+        let calls_after_failure = Arc::clone(&calls_after_failure);
+        move |call: StepCall<(), ParallelFailureJob, TurnOutcome>| {
+            let expected_failure = expected_for_dispatch.clone();
+            let fail_calls = Arc::clone(&fail_calls);
+            let sibling_calls = Arc::clone(&sibling_calls);
+            let calls_after_failure = Arc::clone(&calls_after_failure);
+            let observer = observer.clone();
+            let cleanup_started_tx = cleanup_started_tx.clone();
             async move {
-                calls.fetch_add(1, Ordering::SeqCst);
                 match call.job {
                     ParallelFailureJob::Fail => {
-                        started.wait().await;
-                        Err(AgentError::new(
-                            ErrorKind::Provider,
-                            "first failure",
-                            FailurePhase::Running,
-                            EffectState::Possible,
-                        ))
+                        fail_calls.fetch_add(1, Ordering::SeqCst);
+                        FakeService
+                            .oneshot(AgentRequest::with_context(
+                                Turn::new("fail after sibling starts").with_options(
+                                    FakeOptions::fail_with(expected_failure)
+                                        .with_script([FakeStep::Delay(Duration::from_secs(1))]),
+                                ),
+                                call.agent_context(),
+                            ))
+                            .await
                     }
                     ParallelFailureJob::AwaitCancellation => {
-                        started.wait().await;
-                        call.cancellation.cancelled().await;
-                        cancellation_seen_tx.send(()).expect("receiver is alive");
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                        Err(AgentError::cancelled(EffectState::Possible))
+                        sibling_calls.fetch_add(1, Ordering::SeqCst);
+                        let result = FakeService
+                            .oneshot(AgentRequest::with_context(
+                                Turn::new("drain on cancellation").with_options(
+                                    FakeOptions::succeed(TurnOutcome::new("too late")).with_script(
+                                        [
+                                            FakeStep::Emit(AgentEvent::Started),
+                                            FakeStep::Delay(Duration::from_secs(30)),
+                                            FakeStep::Emit(AgentEvent::OutputDelta {
+                                                text: "must not be emitted".into(),
+                                            }),
+                                        ],
+                                    ),
+                                ),
+                                call.agent_context().with_events(observer),
+                            ))
+                            .await;
+                        if result
+                            .as_ref()
+                            .is_err_and(|error| error.kind == ErrorKind::Cancelled)
+                        {
+                            cleanup_started_tx.send(()).expect("receiver is alive");
+                            // Model settlement cleanup that outlives the
+                            // workflow deadline after a step failure was latched.
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                        result
                     }
-                    ParallelFailureJob::LaterWave => {
-                        panic!("a later wave started after a sibling failure")
+                    ParallelFailureJob::NotAdmittedAfterFailure => {
+                        calls_after_failure.fetch_add(1, Ordering::SeqCst);
+                        panic!("a new call was admitted after a sibling failure")
                     }
                 }
             }
         }
     });
+    let deadline = Instant::now() + Duration::from_secs(2);
     let request = WorkflowRequest::new(
-        WorkflowContext::new(run_id("run-parallel-failure"))
-            .with_deadline(Instant::now() + Duration::from_millis(100)),
+        WorkflowContext::new(run_id("run-parallel-failure")).with_deadline(deadline),
         definition,
         (),
     );
     let execution = tokio::spawn(async move {
-        WorkflowService::<_, (), AgentError>::new(dispatcher)
+        WorkflowService::<_, TurnOutcome, AgentError>::new(dispatcher)
             .with_max_concurrency(NonZeroUsize::new(2).expect("nonzero"))
             .oneshot(request)
             .await
     });
 
-    tokio::time::timeout(Duration::from_millis(10), cancellation_seen_rx.recv())
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(10), events.recv())
+            .await
+            .expect("scripted sibling should start"),
+        Some(AgentEvent::Started)
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::timeout(Duration::from_millis(10), cleanup_started_rx.recv())
         .await
-        .expect("step failure should cancel its called sibling")
+        .expect("sibling should enter settlement cleanup")
         .expect("sender is alive");
-    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
     let failure = tokio::time::timeout(Duration::from_millis(10), execution)
         .await
-        .expect("called siblings should settle")
+        .expect("called sibling should settle after cancellation")
         .expect("workflow task should not panic")
         .expect_err("workflow should fail");
 
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fail_calls.load(Ordering::SeqCst), 1, "failure retried");
+    assert_eq!(sibling_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls_after_failure.load(Ordering::SeqCst), 0);
+    assert!(
+        events.try_recv().is_err(),
+        "event after the cancelled scripted delay was emitted"
+    );
     match failure {
         WorkflowFailure::StepsFailed { failures, .. } => {
             assert_eq!(failures.len(), 2);
             assert_eq!(failures[0].step_id, step_id("a-fail"));
-            assert_eq!(failures[0].error.kind, ErrorKind::Provider);
-            assert_eq!(failures[0].error.effects, EffectState::Possible);
+            assert_eq!(failures[0].error, expected_failure);
             assert_eq!(failures[1].step_id, step_id("b-await-cancellation"));
             assert_eq!(failures[1].error.kind, ErrorKind::Cancelled);
+            assert_eq!(failures[1].error.effects, EffectState::Possible);
         }
         other => panic!("unexpected failure: {other:?}"),
     }

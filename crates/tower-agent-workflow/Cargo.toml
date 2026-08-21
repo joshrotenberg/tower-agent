@@ -9,7 +9,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Experimental Tower-native workflows over finite tower-agent operations."
+description = "Experimental Tower-native workflows over finite agent and mechanical operations."
 publish = false
 
 [dependencies]

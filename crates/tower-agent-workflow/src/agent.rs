@@ -30,6 +30,11 @@ pub struct AgentStepService<S, P, Options> {
 }
 
 impl<S, P, Options> AgentStepService<S, P, Options> {
+    /// Construct an adapter around a fully composed agent service and a turn preparer.
+    ///
+    /// `prepare` runs synchronously before the inner service is asked for
+    /// readiness. It receives the complete workflow step call and must return
+    /// only the typed turn body; this adapter attaches the host-local context.
     pub fn new(inner: S, prepare: P) -> Self {
         Self {
             inner,
@@ -38,6 +43,7 @@ impl<S, P, Options> AgentStepService<S, P, Options> {
         }
     }
 
+    /// Borrow the fully composed agent service wrapped by this adapter.
     pub fn inner(&self) -> &S {
         &self.inner
     }

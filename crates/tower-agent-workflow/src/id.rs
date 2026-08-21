@@ -3,11 +3,16 @@ use std::fmt;
 use thiserror::Error;
 
 macro_rules! identifier {
-    ($name:ident, $kind:literal) => {
+    ($name:ident, $kind:literal, $description:literal) => {
+        #[doc = $description]
         #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(String);
 
         impl $name {
+            /// Validate and construct this identifier.
+            ///
+            /// Identifiers must be non-empty and contain no surrounding
+            /// whitespace. Their remaining syntax is deliberately host-defined.
             pub fn new(value: impl Into<String>) -> Result<Self, InvalidIdentifier> {
                 let value = value.into();
                 if value.trim().is_empty() || value.trim() != value {
@@ -16,10 +21,12 @@ macro_rules! identifier {
                 Ok(Self(value))
             }
 
+            /// Borrow the validated identifier text.
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
+            /// Consume this identifier and return its owned text.
             pub fn into_string(self) -> String {
                 self.0
             }
@@ -55,11 +62,28 @@ macro_rules! identifier {
     };
 }
 
-identifier!(WorkflowId, "workflow id");
-identifier!(WorkflowVersion, "workflow version");
-identifier!(WorkflowRunId, "workflow run id");
-identifier!(StepId, "step id");
+identifier!(
+    WorkflowId,
+    "workflow id",
+    "A stable host-defined identity for a workflow."
+);
+identifier!(
+    WorkflowVersion,
+    "workflow version",
+    "A host-defined version identifying an immutable workflow definition."
+);
+identifier!(
+    WorkflowRunId,
+    "workflow run id",
+    "A host-defined identity for one workflow execution."
+);
+identifier!(
+    StepId,
+    "step id",
+    "A stable identity for one workflow step."
+);
 
+/// The error returned when a workflow identifier violates its basic contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("{kind} must be non-empty and contain no surrounding whitespace")]
 pub struct InvalidIdentifier {
@@ -67,6 +91,7 @@ pub struct InvalidIdentifier {
 }
 
 impl InvalidIdentifier {
+    /// Return the kind of identifier that failed validation.
     pub const fn kind(self) -> &'static str {
         self.kind
     }
