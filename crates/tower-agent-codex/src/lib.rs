@@ -356,61 +356,10 @@ fn map_usage(usage: codex_wrapper::TokenUsage) -> TokenUsage {
     }
 }
 
-/// A terminal failure explains itself: prefer the provider's own error
-/// event from the stdout JSONL stream (codex reports semantic failures
-/// there, not on stderr), then fall back to a bounded stderr tail.
-fn command_failed_message(provider: &str, exit_code: i32, stdout: &str, stderr: &str) -> String {
-    if let Some(reason) = stdout_error_message(stdout) {
-        return format!("{provider} command failed with exit code {exit_code}: {reason}");
-    }
-    let tail: String = {
-        let trimmed = stderr.trim();
-        let start = trimmed.len().saturating_sub(400);
-        trimmed
-            .get(start..)
-            .or_else(|| trimmed.get(..))
-            .unwrap_or_default()
-            .to_string()
-    };
-    if tail.is_empty() {
-        format!("{provider} command failed with exit code {exit_code}")
-    } else {
-        format!("{provider} command failed with exit code {exit_code}: {tail}")
-    }
-}
-
-/// Extract the message of the last error-shaped JSONL event, unwrapping one
-/// level of nested error JSON when the message itself is an encoded API
-/// error body.
-fn stdout_error_message(stdout: &str) -> Option<String> {
-    let mut last: Option<String> = None;
-    for line in stdout.lines() {
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let message = match event.get("type").and_then(|t| t.as_str()) {
-            Some("error") => event.get("message").and_then(|m| m.as_str()),
-            Some("turn.failed") => event
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str()),
-            _ => None,
-        };
-        if let Some(message) = message {
-            let unwrapped = serde_json::from_str::<serde_json::Value>(message)
-                .ok()
-                .and_then(|inner| {
-                    inner
-                        .get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| message.to_string());
-            last = Some(unwrapped.chars().take(400).collect());
-        }
-    }
-    last
+/// Keep unclassified failures useful without forwarding provider output,
+/// command arguments, paths, prompts, or credentials across the adapter.
+fn command_failed_message(provider: &str, exit_code: i32) -> String {
+    format!("{provider} command failed with exit code {exit_code}")
 }
 
 fn cancelled_before_launch() -> AgentError {
@@ -462,6 +411,12 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
                 EffectState::None,
             )
         }
+        codex_wrapper::Error::Io { .. } => AgentError::new(
+            ErrorKind::Provider,
+            "Codex process I/O failed",
+            FailurePhase::Running,
+            EffectState::Possible,
+        ),
         codex_wrapper::Error::Timeout { .. } => AgentError::new(
             ErrorKind::DeadlineExceeded,
             "Codex command exceeded its configured timeout",
@@ -469,14 +424,36 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
             EffectState::Possible,
         ),
         codex_wrapper::Error::Cancelled { .. } => cancelled_in_flight(),
-        codex_wrapper::Error::CommandFailed {
-            exit_code,
-            stdout,
-            stderr,
-            ..
-        } => AgentError::new(
+        codex_wrapper::Error::Auth { .. } => AgentError::new(
+            ErrorKind::Authentication,
+            "Codex credentials were rejected",
+            FailurePhase::Running,
+            // The CLI may re-authenticate after tools have already run. Its
+            // deterministic classification is retry evidence, not proof that
+            // the turn had no effects.
+            EffectState::Possible,
+        ),
+        codex_wrapper::Error::Config { .. } => AgentError::new(
             ErrorKind::Provider,
-            command_failed_message("Codex", exit_code, &stdout, &stderr),
+            "Codex rejected its launch configuration",
+            FailurePhase::Validation,
+            EffectState::None,
+        ),
+        codex_wrapper::Error::NotTrustedDirectory { .. } => AgentError::new(
+            ErrorKind::Unauthorized,
+            "Codex refused the working directory",
+            FailurePhase::Validation,
+            EffectState::None,
+        ),
+        codex_wrapper::Error::SessionNotFound { .. } => AgentError::new(
+            ErrorKind::InvalidRequest,
+            "Codex session was not found",
+            FailurePhase::Validation,
+            EffectState::None,
+        ),
+        codex_wrapper::Error::CommandFailed { exit_code, .. } => AgentError::new(
+            ErrorKind::Provider,
+            command_failed_message("Codex", exit_code),
             FailurePhase::Running,
             EffectState::Possible,
         ),
@@ -485,6 +462,43 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
             "Codex returned an invalid event stream",
             FailurePhase::Settlement,
             EffectState::Possible,
+        ),
+        codex_wrapper::Error::TokenBudgetExceeded {
+            total_tokens,
+            max_tokens,
+        } => AgentError::new(
+            ErrorKind::Budget,
+            format!("Codex token budget exceeded: {total_tokens} of {max_tokens} tokens"),
+            FailurePhase::Running,
+            EffectState::Possible,
+        ),
+        codex_wrapper::Error::InvalidRolloutBudget { .. } => AgentError::new(
+            ErrorKind::InvalidRequest,
+            "Codex rollout budget configuration was invalid",
+            FailurePhase::Validation,
+            EffectState::None,
+        ),
+        codex_wrapper::Error::DangerousNotAllowed { .. } => AgentError::new(
+            ErrorKind::Unauthorized,
+            "Codex safety controls cannot be bypassed by this host",
+            FailurePhase::Validation,
+            EffectState::None,
+        ),
+        codex_wrapper::Error::VersionMismatch { found, minimum } => AgentError::new(
+            ErrorKind::Unsupported,
+            format!("Codex CLI {found} is older than required version {minimum}"),
+            FailurePhase::Launch,
+            EffectState::None,
+        ),
+        codex_wrapper::Error::UntestedCliVersion {
+            found,
+            tested_min,
+            tested_max,
+        } => AgentError::new(
+            ErrorKind::Unsupported,
+            format!("Codex CLI {found} is outside the tested range {tested_min}..={tested_max}"),
+            FailurePhase::Launch,
+            EffectState::None,
         ),
         _ => AgentError::new(
             ErrorKind::Provider,
@@ -816,29 +830,201 @@ mod tests {
 }
 
 #[cfg(test)]
-mod stdout_error_tests {
-    use super::stdout_error_message;
+mod error_mapping_tests {
+    use codex_wrapper::Error;
+    use codex_wrapper::version::CliVersion;
 
-    #[test]
-    fn prefers_the_last_stdout_error_event_and_unwraps_nested_json() {
-        let stdout = concat!(
-            "{\"type\":\"turn.started\"}\n",
-            "{\"type\":\"error\",\"message\":\"{\\\"type\\\":\\\"error\\\",\\\"status\\\":400,\\\"error\\\":{\\\"type\\\":\\\"invalid_request_error\\\",\\\"message\\\":\\\"The 'haiku' model is not supported.\\\"}}\"}\n",
-            "not json\n",
-        );
-        assert_eq!(
-            stdout_error_message(stdout).as_deref(),
-            Some("The 'haiku' model is not supported.")
-        );
-        assert_eq!(stdout_error_message("{\"type\":\"turn.started\"}\n"), None);
+    use super::*;
+
+    struct Case {
+        name: &'static str,
+        error: Error,
+        kind: ErrorKind,
+        phase: FailurePhase,
+        effects: EffectState,
     }
 
     #[test]
-    fn turn_failed_events_carry_their_error_message() {
-        let stdout = "{\"type\":\"turn.failed\",\"error\":{\"message\":\"plain failure\"}}\n";
-        assert_eq!(
-            stdout_error_message(stdout).as_deref(),
-            Some("plain failure")
-        );
+    fn typed_wrapper_failures_preserve_retry_evidence_without_leaking_diagnostics() {
+        let secret = "secret-command-session-or-token";
+        let json_source = serde_json::from_str::<serde_json::Value>("{")
+            .expect_err("invalid JSON creates a parser error");
+        let cases = vec![
+            Case {
+                name: "not found",
+                error: Error::NotFound,
+                kind: ErrorKind::Provider,
+                phase: FailurePhase::Launch,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "authentication",
+                error: Error::Auth {
+                    message: secret.into(),
+                    command: secret.into(),
+                    exit_code: 1,
+                    working_dir: Some(PathBuf::from(secret)),
+                },
+                kind: ErrorKind::Authentication,
+                phase: FailurePhase::Running,
+                effects: EffectState::Possible,
+            },
+            Case {
+                name: "configuration",
+                error: Error::Config {
+                    message: secret.into(),
+                    command: secret.into(),
+                    exit_code: 1,
+                    working_dir: Some(PathBuf::from(secret)),
+                },
+                kind: ErrorKind::Provider,
+                phase: FailurePhase::Validation,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "untrusted directory",
+                error: Error::NotTrustedDirectory {
+                    message: secret.into(),
+                    command: secret.into(),
+                    exit_code: 1,
+                    working_dir: Some(PathBuf::from(secret)),
+                },
+                kind: ErrorKind::Unauthorized,
+                phase: FailurePhase::Validation,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "session missing",
+                error: Error::SessionNotFound {
+                    message: secret.into(),
+                    command: secret.into(),
+                    exit_code: 1,
+                    working_dir: Some(PathBuf::from(secret)),
+                },
+                kind: ErrorKind::InvalidRequest,
+                phase: FailurePhase::Validation,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "unclassified command failure",
+                error: Error::CommandFailed {
+                    command: secret.into(),
+                    exit_code: 23,
+                    stdout: secret.into(),
+                    stderr: secret.into(),
+                    working_dir: Some(PathBuf::from(secret)),
+                },
+                kind: ErrorKind::Provider,
+                phase: FailurePhase::Running,
+                effects: EffectState::Possible,
+            },
+            Case {
+                name: "spawn I/O",
+                error: Error::Io {
+                    message: "failed to spawn codex: secret".into(),
+                    source: std::io::Error::other(secret),
+                    working_dir: Some(PathBuf::from(secret)),
+                },
+                kind: ErrorKind::Provider,
+                phase: FailurePhase::Launch,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "in-flight I/O",
+                error: Error::Io {
+                    message: secret.into(),
+                    source: std::io::Error::other(secret),
+                    working_dir: Some(PathBuf::from(secret)),
+                },
+                kind: ErrorKind::Provider,
+                phase: FailurePhase::Running,
+                effects: EffectState::Possible,
+            },
+            Case {
+                name: "timeout",
+                error: Error::Timeout { timeout_seconds: 5 },
+                kind: ErrorKind::DeadlineExceeded,
+                phase: FailurePhase::Running,
+                effects: EffectState::Possible,
+            },
+            Case {
+                name: "cancelled",
+                error: Error::Cancelled { grace_seconds: 1 },
+                kind: ErrorKind::Cancelled,
+                phase: FailurePhase::Running,
+                effects: EffectState::Possible,
+            },
+            Case {
+                name: "invalid JSON",
+                error: Error::Json {
+                    message: secret.into(),
+                    source: json_source,
+                },
+                kind: ErrorKind::Provider,
+                phase: FailurePhase::Settlement,
+                effects: EffectState::Possible,
+            },
+            Case {
+                name: "token budget",
+                error: Error::TokenBudgetExceeded {
+                    total_tokens: 120,
+                    max_tokens: 100,
+                },
+                kind: ErrorKind::Budget,
+                phase: FailurePhase::Running,
+                effects: EffectState::Possible,
+            },
+            Case {
+                name: "invalid rollout budget",
+                error: Error::InvalidRolloutBudget {
+                    message: secret.into(),
+                },
+                kind: ErrorKind::InvalidRequest,
+                phase: FailurePhase::Validation,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "dangerous bypass refused",
+                error: Error::DangerousNotAllowed { variable: secret },
+                kind: ErrorKind::Unauthorized,
+                phase: FailurePhase::Validation,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "old CLI",
+                error: Error::VersionMismatch {
+                    found: CliVersion::new(0, 1, 0),
+                    minimum: CliVersion::new(0, 145, 0),
+                },
+                kind: ErrorKind::Unsupported,
+                phase: FailurePhase::Launch,
+                effects: EffectState::None,
+            },
+            Case {
+                name: "untested CLI",
+                error: Error::UntestedCliVersion {
+                    found: CliVersion::new(1, 0, 0),
+                    tested_min: CliVersion::new(0, 145, 0),
+                    tested_max: CliVersion::new(0, 147, 0),
+                },
+                kind: ErrorKind::Unsupported,
+                phase: FailurePhase::Launch,
+                effects: EffectState::None,
+            },
+        ];
+
+        for case in cases {
+            let mapped = map_run_error(case.error);
+            assert_eq!(mapped.kind, case.kind, "{} kind", case.name);
+            assert_eq!(mapped.phase, case.phase, "{} phase", case.name);
+            assert_eq!(mapped.effects, case.effects, "{} effects", case.name);
+            assert!(!mapped.message.is_empty(), "{} message", case.name);
+            assert!(
+                !mapped.message.contains(secret),
+                "{} leaked a provider diagnostic: {}",
+                case.name,
+                mapped.message
+            );
+        }
     }
 }
