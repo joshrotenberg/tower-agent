@@ -15,6 +15,12 @@
 //! Filesystem authority is portable rather than a wrapper flag. Each turn asks
 //! for a [`FilesystemAuthority`], while [`CodexService`] enforces a host-owned
 //! [`AuthorityPolicy`] immediately before launch. The default is read-only.
+//!
+//! [`CodexAmbientContextPolicy::Automation`] applies the host-owned config and
+//! project-instruction controls intended for queued execution. It reduces
+//! ambient context but does not remove provider built-ins, managed host
+//! instructions, discovered skills, workspace contents, or the child
+//! environment. Ephemeral turns are a separate per-turn persistence choice.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -50,6 +56,10 @@ pub struct CodexOptions {
     pub additional_directories: Vec<PathBuf>,
     /// Portable filesystem authority requested for this turn.
     pub filesystem_authority: FilesystemAuthority,
+    /// Do not persist this turn into resumable rollout history. Ephemeral
+    /// outcomes deliberately omit a session handle even if the CLI reports a
+    /// transient thread id.
+    pub ephemeral: bool,
 }
 
 impl RequestsFilesystemAuthority for CodexOptions {
@@ -62,6 +72,17 @@ impl RequestsFilesystemAuthority for CodexOptions {
     }
 }
 
+/// Host-owned control over ambient Codex configuration and project context.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodexAmbientContextPolicy {
+    /// Preserve the Codex CLI's normal ambient configuration behavior.
+    #[default]
+    Inherit,
+    /// Ignore user config and execpolicy rules, reject unknown config keys,
+    /// and suppress project instruction documents.
+    Automation,
+}
+
 /// A cloneable Tower service that runs one finite Codex turn per call.
 #[derive(Clone, Debug)]
 pub struct CodexService {
@@ -70,6 +91,7 @@ pub struct CodexService {
     termination_grace: Option<Duration>,
     authority_policy: AuthorityPolicy,
     child_environment: ChildEnvironmentPolicy,
+    ambient_context: CodexAmbientContextPolicy,
 }
 
 impl CodexService {
@@ -81,6 +103,7 @@ impl CodexService {
             termination_grace: None,
             authority_policy: AuthorityPolicy::read_only(),
             child_environment: ChildEnvironmentPolicy::default(),
+            ambient_context: CodexAmbientContextPolicy::default(),
         }
     }
 
@@ -124,6 +147,17 @@ impl CodexService {
 
     pub const fn child_environment_policy(&self) -> &ChildEnvironmentPolicy {
         &self.child_environment
+    }
+
+    /// Set the host-owned ambient-context policy. Remote turn options cannot
+    /// weaken this baseline.
+    pub fn with_ambient_context_policy(mut self, policy: CodexAmbientContextPolicy) -> Self {
+        self.ambient_context = policy;
+        self
+    }
+
+    pub const fn ambient_context_policy(&self) -> CodexAmbientContextPolicy {
+        self.ambient_context
     }
 
     pub fn codex_home(&self) -> Option<&Path> {
@@ -205,19 +239,19 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             let _ = observer.try_emit(AgentEvent::Started);
             let result = match &turn.session {
                 Some(session) => {
-                    resume_command(&turn, session)
+                    resume_command(&turn, session, service.ambient_context)
                         .execute_json_cancellable(&codex, cancellation.cancelled())
                         .await
                 }
                 None => {
-                    fresh_command(&turn)
+                    fresh_command(&turn, service.ambient_context)
                         .execute_json_cancellable(&codex, cancellation.cancelled())
                         .await
                 }
             };
             let result = result.map_err(map_run_error)?;
 
-            let outcome = adapt_outcome(result, turn.session, started.elapsed());
+            let outcome = adapt_outcome(result, turn.session, started.elapsed(), turn.ephemeral);
             let _ = observer.try_emit(AgentEvent::OutputDelta {
                 text: outcome.output.clone(),
             });
@@ -233,6 +267,7 @@ struct PreparedTurn {
     model: Option<String>,
     additional_directories: Vec<String>,
     filesystem_authority: FilesystemAuthority,
+    ephemeral: bool,
 }
 
 fn prepare(
@@ -298,6 +333,7 @@ fn prepare(
             model: turn.options.model,
             additional_directories,
             filesystem_authority: turn.options.filesystem_authority,
+            ephemeral: turn.options.ephemeral,
         },
         cancellation,
     ))
@@ -312,10 +348,20 @@ fn compose_prompt(prompt: &str, system_prompt: Option<&str>) -> String {
     }
 }
 
-fn fresh_command(turn: &PreparedTurn) -> ExecCommand {
+fn fresh_command(turn: &PreparedTurn, ambient: CodexAmbientContextPolicy) -> ExecCommand {
     let mut command = ExecCommand::from_stdin(turn.prompt.clone())
         .sandbox(sandbox_mode(turn.filesystem_authority))
         .skip_git_repo_check();
+    if ambient == CodexAmbientContextPolicy::Automation {
+        command = command
+            .strict_config()
+            .ignore_user_config()
+            .ignore_rules()
+            .config("project_doc_max_bytes=0");
+    }
+    if turn.ephemeral {
+        command = command.ephemeral();
+    }
     if let Some(model) = &turn.model {
         command = command.model(model);
     }
@@ -325,11 +371,25 @@ fn fresh_command(turn: &PreparedTurn) -> ExecCommand {
     command
 }
 
-fn resume_command(turn: &PreparedTurn, session: &str) -> ExecResumeCommand {
+fn resume_command(
+    turn: &PreparedTurn,
+    session: &str,
+    ambient: CodexAmbientContextPolicy,
+) -> ExecResumeCommand {
     let mut command = ExecResumeCommand::from_stdin(turn.prompt.clone())
         .session_id(session)
         .config(sandbox_config(turn.filesystem_authority))
         .skip_git_repo_check();
+    if ambient == CodexAmbientContextPolicy::Automation {
+        command = command
+            .strict_config()
+            .ignore_user_config()
+            .ignore_rules()
+            .config("project_doc_max_bytes=0");
+    }
+    if turn.ephemeral {
+        command = command.ephemeral();
+    }
     if let Some(model) = &turn.model {
         command = command.model(model);
     }
@@ -356,13 +416,18 @@ fn adapt_outcome(
     result: QueryResult,
     prior_session: Option<String>,
     duration: Duration,
+    ephemeral: bool,
 ) -> TurnOutcome {
     let output = result.result;
-    let session = result
-        .thread_id
-        .or(result.session_id)
-        .or(prior_session)
-        .map(|value| SessionHandle::new(PROVIDER, value));
+    let session = if ephemeral {
+        None
+    } else {
+        result
+            .thread_id
+            .or(result.session_id)
+            .or(prior_session)
+            .map(|value| SessionHandle::new(PROVIDER, value))
+    };
     let mut outcome = TurnOutcome::new(output);
     outcome.session = session;
     outcome.usage = result.usage.map(map_usage);
@@ -589,6 +654,107 @@ mod tests {
         assert_eq!(outcome.output, "ok");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn automation_and_ephemeral_controls_reach_fresh_and_resume_argv() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-ambient-{}.sh",
+            std::process::id()
+        ));
+        let argv_path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-ambient-{}.args",
+            std::process::id()
+        ));
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' \"$@\" > '{}'\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"transient-thread\"}}'\n",
+                "printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}'\n",
+                "printf '%s\\n' '{{\"type\":\"turn.completed\"}}'\n",
+            ),
+            argv_path.display()
+        );
+        std::fs::write(&path, script).expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let service = CodexService::new()
+            .with_binary(&path)
+            .with_ambient_context_policy(CodexAmbientContextPolicy::Automation);
+        let options = CodexOptions {
+            ephemeral: true,
+            ..CodexOptions::default()
+        };
+        let fresh = service
+            .clone()
+            .oneshot(request("fresh", options.clone()))
+            .await
+            .expect("fresh automation turn succeeds");
+        let fresh_args = std::fs::read_to_string(&argv_path).expect("fresh argv recorded");
+        assert_eq!(
+            fresh_args.lines().collect::<Vec<_>>(),
+            [
+                "exec",
+                "-c",
+                "project_doc_max_bytes=0",
+                "--sandbox",
+                "read-only",
+                "--strict-config",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "-",
+                "--json",
+            ]
+        );
+        assert_eq!(
+            fresh.session, None,
+            "ephemeral thread must not be resumable"
+        );
+
+        let resumed = service
+            .oneshot(AgentRequest::new(
+                Turn::new("resume")
+                    .with_options(options)
+                    .resume(SessionHandle::new(PROVIDER, "thread-existing")),
+            ))
+            .await
+            .expect("resumed automation turn succeeds");
+        let resume_args = std::fs::read_to_string(&argv_path).expect("resume argv recorded");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(argv_path);
+
+        assert_eq!(
+            resume_args.lines().collect::<Vec<_>>(),
+            [
+                "exec",
+                "resume",
+                "-c",
+                "sandbox_mode=\"read-only\"",
+                "-c",
+                "project_doc_max_bytes=0",
+                "--strict-config",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "thread-existing",
+                "-",
+                "--json",
+            ]
+        );
+        assert_eq!(
+            resumed.session, None,
+            "ephemeral resume must not imply the turn was persisted"
+        );
+    }
+
     #[test]
     fn fresh_command_preserves_existing_read_only_default_and_maps_options() {
         let options = CodexOptions {
@@ -596,10 +762,11 @@ mod tests {
             model: Some("gpt-test".into()),
             additional_directories: vec![PathBuf::from("/work/extra")],
             filesystem_authority: FilesystemAuthority::ReadOnly,
+            ephemeral: false,
         };
         let (prepared, _) =
             prepare(request("do it", options), &AuthorityPolicy::read_only()).expect("valid turn");
-        let args = fresh_command(&prepared).args();
+        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit).args();
 
         assert!(
             args.windows(2)
@@ -628,7 +795,7 @@ mod tests {
             .with_options(options)
             .in_directory(&crate_root);
         let (prepared, _) = prepare(AgentRequest::new(turn), &policy).expect("authorized turn");
-        let args = fresh_command(&prepared).args();
+        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit).args();
 
         assert!(
             args.windows(2)
@@ -698,8 +865,9 @@ mod tests {
             model: None,
             additional_directories: Vec::new(),
             filesystem_authority: FilesystemAuthority::ReadOnly,
+            ephemeral: false,
         };
-        let args = resume_command(&turn, "thread-1").args();
+        let args = resume_command(&turn, "thread-1", CodexAmbientContextPolicy::Inherit).args();
 
         assert!(
             args.windows(2)
@@ -736,7 +904,7 @@ mod tests {
             events: Vec::new(),
         };
 
-        let outcome = adapt_outcome(result, None, Duration::ZERO);
+        let outcome = adapt_outcome(result, None, Duration::ZERO, false);
         assert_eq!(
             outcome.session.as_ref().map(SessionHandle::value),
             Some("thread-1")

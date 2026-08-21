@@ -144,6 +144,44 @@ chosen authentication or tool path truly requires the ambient home. This is a
 direct-child environment boundary, not an OS sandbox: a same-UID child may
 still inspect files, sockets, or process metadata allowed by the platform.
 
+### Provider ambient context
+
+Ambient-context policy is host-owned even when a turn may request a stronger
+mode. It is not a portable boolean: the providers expose different mechanisms
+and leave different residual inputs.
+
+`CodexAmbientContextPolicy::Automation` applies `--ignore-user-config`,
+`--ignore-rules`, `--strict-config`, and `project_doc_max_bytes=0` to both fresh
+and resumed execution. The rules flag concerns execpolicy `.rules`; it does not
+disable project instructions by itself. The project-document override is what
+suppresses `AGENTS.md`. This profile still admits Codex/provider built-ins,
+managed host instructions, discovered skill inventory, the explicit prompt,
+workspace contents, and the configured child environment. It is a predictable
+automation profile, not a claim of hermetic execution.
+
+`CodexOptions::ephemeral` is independent of context policy. It prevents rollout
+persistence for fresh and resumed calls. The adapter omits `SessionHandle` from
+an ephemeral outcome even if the CLI emits a transient thread id, because that
+id does not prove the completed turn can be resumed.
+
+Claude exposes mutually exclusive `ClaudeAmbientContext` modes:
+
+| Mode | Provider behavior | Important residuals |
+|---|---|---|
+| `Inherit` | Normal Claude loading | User/project/local settings, customizations, memory, managed policy |
+| `Hermetic(Project)` | Keep user settings; seal project/local sources and MCP | User settings, managed policy, provider built-ins, dynamic sections moved into the first user message |
+| `Hermetic(Full)` | Seal user/project/local setting sources and MCP | Managed policy, provider built-ins, explicit prompts, and some state outside setting sources |
+| `Safe` | Disable CLAUDE.md, skills, plugins, hooks, MCP, custom agents/commands, and auto-memory | Managed policy, normal OAuth/keychain auth, model selection, built-in tools and permissions |
+| `Bare` | Minimal scripted mode with additional services disabled | API-key or explicit-helper auth, provider built-ins, explicit prompts/tools, workspace and environment visibility |
+
+The Claude service combines a host baseline with the requested turn mode.
+Inherited requests keep the host baseline; project hermetic can strengthen to
+full hermetic; safe and bare cannot replace one another or a host-required
+hermetic posture. Conflicts fail during validation. None of these modes hides
+workspace files or child environment variables; compose them with filesystem
+authority and `ChildEnvironmentPolicy` where the provider supports those
+boundaries.
+
 ## Middleware opportunities
 
 ### Filesystem authority
