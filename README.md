@@ -113,6 +113,13 @@ Codex sends fresh and resumed prompts over stdin. Provider controls are
 honor-or-refuse:
 unsupported combinations fail before work starts.
 
+`CodexAmbientContextPolicy::Automation` suppresses user config, execpolicy
+rules, and project instructions for queued execution. A host may additionally
+use `CodexSkillPolicy::DisableExact` to disable canonical skill folders for
+fresh and resumed turns. Codex does not currently document a global skill
+disable, so unlisted discovered skills, provider built-ins, and managed
+instructions may remain.
+
 Run the executable composition example with:
 
 ```text
