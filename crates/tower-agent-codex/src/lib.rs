@@ -21,8 +21,11 @@
 //! [`CodexAmbientContextPolicy::Automation`] applies the host-owned config and
 //! project-instruction controls intended for queued execution. It reduces
 //! ambient context but does not remove provider built-ins, managed host
-//! instructions, discovered skills, workspace contents, or the child
-//! environment. Ephemeral turns are a separate per-turn persistence choice.
+//! instructions, workspace contents, or the child environment.
+//! [`CodexSkillPolicy::DisableExact`] can additionally disable exact,
+//! host-selected skill folders, but Codex currently has no documented global
+//! skill-disable setting. Unlisted discovered skills can therefore remain.
+//! Ephemeral turns are a separate per-turn persistence choice.
 
 use std::fmt;
 use std::future::Future;
@@ -47,6 +50,12 @@ const PROVIDER: &str = "codex";
 
 /// Maximum serialized size accepted for a Codex output schema.
 pub const MAX_OUTPUT_SCHEMA_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of exact skill folders accepted by one host policy.
+pub const MAX_DISABLED_SKILLS: usize = 256;
+
+/// Maximum encoded Codex config override produced by one host skill policy.
+pub const MAX_SKILL_CONFIG_BYTES: usize = 64 * 1024;
 
 /// Per-turn controls supported by the Codex provider service.
 ///
@@ -115,6 +124,36 @@ pub enum CodexAmbientContextPolicy {
     Automation,
 }
 
+/// Host-owned policy for discovered Codex skills.
+///
+/// Codex currently documents only exact-path skill enablement overrides. This
+/// policy therefore does not claim to suppress every discovered skill or any
+/// provider built-in or managed instruction.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum CodexSkillPolicy {
+    /// Preserve Codex's normal discovered-skill behavior.
+    #[default]
+    Inherit,
+    /// Disable these exact skill folders for fresh and resumed turns.
+    ///
+    /// Each path is canonicalized before launch and must identify a directory
+    /// containing `SKILL.md`.
+    DisableExact(Vec<PathBuf>),
+}
+
+impl fmt::Debug for CodexSkillPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inherit => formatter.write_str("Inherit"),
+            Self::DisableExact(paths) => formatter
+                .debug_struct("DisableExact")
+                .field("paths", &"<redacted>")
+                .field("count", &paths.len())
+                .finish(),
+        }
+    }
+}
+
 /// A cloneable Tower service that runs one finite Codex turn per call.
 #[derive(Clone, Debug)]
 pub struct CodexService {
@@ -126,6 +165,7 @@ pub struct CodexService {
     authority_policy: AuthorityPolicy,
     child_environment: ChildEnvironmentPolicy,
     ambient_context: CodexAmbientContextPolicy,
+    skill_policy: CodexSkillPolicy,
 }
 
 impl CodexService {
@@ -140,6 +180,7 @@ impl CodexService {
             authority_policy: AuthorityPolicy::read_only(),
             child_environment: ChildEnvironmentPolicy::default(),
             ambient_context: CodexAmbientContextPolicy::default(),
+            skill_policy: CodexSkillPolicy::default(),
         }
     }
 
@@ -221,6 +262,17 @@ impl CodexService {
 
     pub const fn ambient_context_policy(&self) -> CodexAmbientContextPolicy {
         self.ambient_context
+    }
+
+    /// Set the host-owned discovered-skill policy. Remote turn options cannot
+    /// weaken or replace this policy.
+    pub fn with_skill_policy(mut self, policy: CodexSkillPolicy) -> Self {
+        self.skill_policy = policy;
+        self
+    }
+
+    pub const fn skill_policy(&self) -> &CodexSkillPolicy {
+        &self.skill_policy
     }
 
     pub fn codex_home(&self) -> Option<&Path> {
@@ -316,6 +368,7 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
                 return Err(cancelled_before_launch());
             }
 
+            let skill_config = render_skill_config(&service.skill_policy)?;
             let started = Instant::now();
             let codex = service.build_codex(turn.working_directory.as_deref(), operation_id)?;
 
@@ -345,14 +398,25 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             let _ = observer.try_emit(AgentEvent::Started);
             let result = match &turn.session {
                 Some(session) => {
-                    resume_command(&turn, session, service.ambient_context, output_schema_path)
-                        .execute_json_cancellable(&codex, cancellation.cancelled())
-                        .await
+                    resume_command(
+                        &turn,
+                        session,
+                        service.ambient_context,
+                        output_schema_path,
+                        skill_config.as_deref(),
+                    )
+                    .execute_json_cancellable(&codex, cancellation.cancelled())
+                    .await
                 }
                 None => {
-                    fresh_command(&turn, service.ambient_context, output_schema_path)
-                        .execute_json_cancellable(&codex, cancellation.cancelled())
-                        .await
+                    fresh_command(
+                        &turn,
+                        service.ambient_context,
+                        output_schema_path,
+                        skill_config.as_deref(),
+                    )
+                    .execute_json_cancellable(&codex, cancellation.cancelled())
+                    .await
                 }
             };
             drop(output_schema_file);
@@ -514,10 +578,68 @@ fn compose_prompt(prompt: &str, system_prompt: Option<&str>) -> String {
     }
 }
 
+fn render_skill_config(policy: &CodexSkillPolicy) -> Result<Option<String>, AgentError> {
+    let CodexSkillPolicy::DisableExact(paths) = policy else {
+        return Ok(None);
+    };
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    if paths.len() > MAX_DISABLED_SKILLS {
+        return Err(skill_policy_error(
+            "Codex skill policy exceeds the configured path limit",
+        ));
+    }
+
+    let mut canonical_paths = Vec::with_capacity(paths.len());
+    for path in paths {
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|_| skill_policy_error("configured Codex skill path could not be resolved"))?;
+        if !canonical.is_dir() || !canonical.join("SKILL.md").is_file() {
+            return Err(skill_policy_error(
+                "configured Codex skill path does not identify a skill folder",
+            ));
+        }
+        canonical_paths.push(canonical);
+    }
+    canonical_paths.sort();
+    canonical_paths.dedup();
+
+    let entries = canonical_paths
+        .iter()
+        .map(|path| {
+            let path = path.to_str().ok_or_else(|| {
+                skill_policy_error("configured Codex skill path is not valid UTF-8")
+            })?;
+            let encoded = serde_json::to_string(path).map_err(|_| {
+                skill_policy_error("configured Codex skill path could not be encoded")
+            })?;
+            Ok(format!("{{path={encoded},enabled=false}}"))
+        })
+        .collect::<Result<Vec<_>, AgentError>>()?;
+    let config = format!("skills.config=[{}]", entries.join(","));
+    if config.len() > MAX_SKILL_CONFIG_BYTES {
+        return Err(skill_policy_error(
+            "Codex skill policy exceeds the encoded size limit",
+        ));
+    }
+    Ok(Some(config))
+}
+
+fn skill_policy_error(message: &'static str) -> AgentError {
+    AgentError::new(
+        ErrorKind::Internal,
+        message,
+        FailurePhase::Launch,
+        EffectState::None,
+    )
+}
+
 fn fresh_command(
     turn: &PreparedTurn,
     ambient: CodexAmbientContextPolicy,
     output_schema_path: Option<&str>,
+    skill_config: Option<&str>,
 ) -> ExecCommand {
     let mut command = ExecCommand::from_stdin(turn.prompt.clone())
         .sandbox(sandbox_mode(turn.filesystem_authority))
@@ -528,6 +650,9 @@ fn fresh_command(
             .ignore_user_config()
             .ignore_rules()
             .config("project_doc_max_bytes=0");
+    }
+    if let Some(config) = skill_config {
+        command = command.strict_config().config(config);
     }
     if turn.ephemeral {
         command = command.ephemeral();
@@ -549,6 +674,7 @@ fn resume_command(
     session: &str,
     ambient: CodexAmbientContextPolicy,
     output_schema_path: Option<&str>,
+    skill_config: Option<&str>,
 ) -> ExecResumeCommand {
     let mut command = ExecResumeCommand::from_stdin(turn.prompt.clone())
         .session_id(session)
@@ -560,6 +686,9 @@ fn resume_command(
             .ignore_user_config()
             .ignore_rules()
             .config("project_doc_max_bytes=0");
+    }
+    if let Some(config) = skill_config {
+        command = command.strict_config().config(config);
     }
     if turn.ephemeral {
         command = command.ephemeral();
@@ -929,6 +1058,79 @@ mod tests {
         paths
     }
 
+    fn create_test_skill(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(name);
+        std::fs::create_dir_all(&path).expect("create test skill folder");
+        std::fs::write(
+            path.join("SKILL.md"),
+            "---\nname: sentinel\ndescription: test only\n---\n",
+        )
+        .expect("write sentinel skill");
+        path
+    }
+
+    #[test]
+    fn exact_skill_policy_canonicalizes_deduplicates_and_encodes_paths() {
+        let root = tempfile::tempdir().expect("create skill root");
+        let skill = create_test_skill(root.path(), "quoted \"skill\"");
+        let canonical = std::fs::canonicalize(&skill).expect("canonical skill path");
+        let policy = CodexSkillPolicy::DisableExact(vec![skill.clone(), skill]);
+
+        let config = render_skill_config(&policy)
+            .expect("valid skill policy")
+            .expect("disable policy emits config");
+        let encoded =
+            serde_json::to_string(canonical.to_str().expect("test path is UTF-8")).unwrap();
+        assert_eq!(
+            config,
+            format!("skills.config=[{{path={encoded},enabled=false}}]")
+        );
+
+        let service = CodexService::new().with_skill_policy(policy.clone());
+        assert_eq!(service.skill_policy(), &policy);
+        assert!(!format!("{service:?}").contains(&canonical.display().to_string()));
+        assert_eq!(
+            render_skill_config(&CodexSkillPolicy::Inherit).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_skill_policy_fails_before_launch_without_disclosing_paths() {
+        let root = tempfile::tempdir().expect("create skill root");
+        let not_a_skill = root.path().join("not-a-skill");
+        std::fs::create_dir(&not_a_skill).expect("create non-skill folder");
+        let invalid_folder =
+            render_skill_config(&CodexSkillPolicy::DisableExact(vec![not_a_skill.clone()]))
+                .expect_err("folder without SKILL.md is rejected");
+        assert_eq!(invalid_folder.kind, ErrorKind::Internal);
+        assert!(!format!("{invalid_folder:?}").contains(&not_a_skill.display().to_string()));
+
+        let secret = root.path().join("secret-skill-path");
+        let error = CodexService::new()
+            .with_binary("/definitely/not/a/codex/binary")
+            .with_skill_policy(CodexSkillPolicy::DisableExact(vec![secret.clone()]))
+            .oneshot(request("hello", CodexOptions::default()))
+            .await
+            .expect_err("missing skill path must fail before provider launch");
+
+        assert_eq!(error.kind, ErrorKind::Internal);
+        assert_eq!(error.phase, FailurePhase::Launch);
+        assert_eq!(error.effects, EffectState::None);
+        assert!(!format!("{error:?}").contains(&secret.display().to_string()));
+    }
+
+    #[test]
+    fn exact_skill_policy_bounds_the_number_of_paths_before_resolution() {
+        let paths = vec![PathBuf::from("/not-resolved"); MAX_DISABLED_SKILLS + 1];
+        let error = render_skill_config(&CodexSkillPolicy::DisableExact(paths))
+            .expect_err("oversized policy is rejected");
+
+        assert_eq!(error.kind, ErrorKind::Internal);
+        assert_eq!(error.phase, FailurePhase::Launch);
+        assert_eq!(error.effects, EffectState::None);
+    }
+
     #[tokio::test]
     async fn invalid_and_oversized_output_schemas_fail_before_launch_without_disclosure() {
         let invalid_sentinel = "invalid-schema-secret";
@@ -1209,9 +1411,16 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
 
+        let skill_root = tempfile::tempdir().expect("create sentinel skill root");
+        let sentinel_skill = create_test_skill(skill_root.path(), "sentinel");
+        let skill_policy = CodexSkillPolicy::DisableExact(vec![sentinel_skill]);
+        let skill_config = render_skill_config(&skill_policy)
+            .expect("valid skill policy")
+            .expect("skill config rendered");
         let service = CodexService::new()
             .with_binary(&path)
-            .with_ambient_context_policy(CodexAmbientContextPolicy::Automation);
+            .with_ambient_context_policy(CodexAmbientContextPolicy::Automation)
+            .with_skill_policy(skill_policy);
         let options = CodexOptions {
             ephemeral: true,
             ..CodexOptions::default()
@@ -1228,6 +1437,8 @@ mod tests {
                 "exec",
                 "-c",
                 "project_doc_max_bytes=0",
+                "-c",
+                skill_config.as_str(),
                 "--sandbox",
                 "read-only",
                 "--strict-config",
@@ -1265,6 +1476,8 @@ mod tests {
                 "sandbox_mode=\"read-only\"",
                 "-c",
                 "project_doc_max_bytes=0",
+                "-c",
+                skill_config.as_str(),
                 "--strict-config",
                 "--skip-git-repo-check",
                 "--ephemeral",
@@ -1293,7 +1506,7 @@ mod tests {
         };
         let (prepared, _) =
             prepare(request("do it", options), &AuthorityPolicy::read_only()).expect("valid turn");
-        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit, None).args();
+        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit, None, None).args();
 
         assert!(
             args.windows(2)
@@ -1306,6 +1519,15 @@ mod tests {
         );
         assert_eq!(args.last().map(String::as_str), Some("-"));
         assert!(!args.iter().any(|arg| arg.contains("do it")));
+
+        let guarded = fresh_command(
+            &prepared,
+            CodexAmbientContextPolicy::Inherit,
+            None,
+            Some("skills.config=[]"),
+        )
+        .args();
+        assert!(guarded.iter().any(|arg| arg == "--strict-config"));
     }
 
     #[test]
@@ -1322,7 +1544,7 @@ mod tests {
             .with_options(options)
             .in_directory(&crate_root);
         let (prepared, _) = prepare(AgentRequest::new(turn), &policy).expect("authorized turn");
-        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit, None).args();
+        let args = fresh_command(&prepared, CodexAmbientContextPolicy::Inherit, None, None).args();
 
         assert!(
             args.windows(2)
@@ -1434,8 +1656,14 @@ mod tests {
             filesystem_authority: FilesystemAuthority::ReadOnly,
             ephemeral: false,
         };
-        let args =
-            resume_command(&turn, "thread-1", CodexAmbientContextPolicy::Inherit, None).args();
+        let args = resume_command(
+            &turn,
+            "thread-1",
+            CodexAmbientContextPolicy::Inherit,
+            None,
+            None,
+        )
+        .args();
 
         assert!(
             args.windows(2)
