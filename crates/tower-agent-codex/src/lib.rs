@@ -422,7 +422,13 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             drop(output_schema_file);
             let result = result.map_err(map_run_error)?;
 
-            let outcome = settle_outcome(result, turn.session, started.elapsed(), turn.ephemeral)?;
+            let outcome = settle_outcome(
+                result,
+                turn.session,
+                started.elapsed(),
+                turn.ephemeral,
+                turn.output_schema.is_some(),
+            )?;
             let _ = observer.try_emit(AgentEvent::OutputDelta {
                 text: outcome.output.clone(),
             });
@@ -719,18 +725,29 @@ fn sandbox_config(authority: FilesystemAuthority) -> &'static str {
 }
 
 fn settle_outcome(
-    result: QueryResult,
+    mut result: QueryResult,
     prior_session: Option<String>,
     duration: Duration,
     ephemeral: bool,
+    structured_output: bool,
 ) -> Result<TurnOutcome, AgentError> {
     let terminal = validate_terminal_events(&result.events)?;
     let session = validated_result_session(&result, prior_session, ephemeral)?;
     let usage = result.usage.map(map_usage);
+    let output = if structured_output {
+        result
+            .events
+            .iter()
+            .rev()
+            .find_map(codex_wrapper::JsonLineEvent::agent_message_text)
+            .unwrap_or_default()
+    } else {
+        std::mem::take(&mut result.result)
+    };
 
     match terminal {
         TerminalState::Completed => {
-            let mut outcome = TurnOutcome::new(result.result);
+            let mut outcome = TurnOutcome::new(output);
             outcome.session = session;
             outcome.usage = usage;
             outcome.duration = Some(duration);
@@ -1229,6 +1246,7 @@ mod tests {
                 "cat \"$schema_path\" > '{}'\n",
                 "cat >/dev/null\n",
                 "printf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"thread-schema\"}}'\n",
+                "printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"earlier\"}}}}'\n",
                 "printf '%s\\n' '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"ok\"}}}}'\n",
                 "printf '%s\\n' '{{\"type\":\"turn.completed\"}}'\n",
             ),
@@ -1241,11 +1259,12 @@ mod tests {
         std::fs::set_permissions(&binary, permissions).unwrap();
         let service = CodexService::new().with_binary(&binary);
 
-        service
+        let fresh = service
             .clone()
             .oneshot(request("fresh", output_schema_options()))
             .await
             .expect("fresh structured turn succeeds");
+        assert_eq!(fresh.output, "ok");
         let fresh_path = PathBuf::from(
             std::fs::read_to_string(&recorded_path).expect("fresh schema path recorded"),
         );
@@ -1256,7 +1275,7 @@ mod tests {
         assert_eq!(fresh_schema, test_output_schema());
         assert!(!fresh_path.exists());
 
-        service
+        let resumed = service
             .oneshot(AgentRequest::new(
                 Turn::new("resume")
                     .with_options(output_schema_options())
@@ -1264,6 +1283,7 @@ mod tests {
             ))
             .await
             .expect("resumed structured turn succeeds");
+        assert_eq!(resumed.output, "ok");
         let resume_path = PathBuf::from(
             std::fs::read_to_string(&recorded_path).expect("resume schema path recorded"),
         );
@@ -1700,7 +1720,7 @@ mod tests {
             events: vec![serde_json::from_str(r#"{"type":"turn.completed"}"#).unwrap()],
         };
 
-        let outcome = settle_outcome(result, None, Duration::ZERO, false)
+        let outcome = settle_outcome(result, None, Duration::ZERO, false, false)
             .expect("completed result settles successfully");
         assert_eq!(
             outcome.session.as_ref().map(SessionHandle::value),
@@ -1715,7 +1735,7 @@ mod tests {
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
             r#"{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}"#,
         ]);
-        let outcome = settle_outcome(valid, None, Duration::from_millis(12), false)
+        let outcome = settle_outcome(valid, None, Duration::from_millis(12), false, false)
             .expect("one final completion is successful");
         assert_eq!(outcome.output, "done");
         assert_eq!(outcome.usage.and_then(TokenUsage::total), Some(5));
@@ -1725,7 +1745,7 @@ mod tests {
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial-secret"}}"#,
             r#"{"type":"turn.failed","error":{"message":"shared rollout token budget exhausted"}}"#,
         ]);
-        let error = settle_outcome(failed, None, Duration::from_millis(7), false)
+        let error = settle_outcome(failed, None, Duration::from_millis(7), false, false)
             .expect_err("failed terminal event is never success");
         assert_eq!(error.kind, ErrorKind::Budget);
         assert_eq!(error.phase, FailurePhase::Running);
@@ -1744,7 +1764,7 @@ mod tests {
             r#"{"type":"thread.started","thread_id":"thread-missing"}"#,
             r#"{"type":"item.completed","item":{"type":"agent_message","text":"partial-missing"}}"#,
         ]);
-        let error = settle_outcome(missing, None, Duration::ZERO, false)
+        let error = settle_outcome(missing, None, Duration::ZERO, false, false)
             .expect_err("missing terminal event is settlement failure");
         assert_eq!(error.kind, ErrorKind::Provider);
         assert_eq!(error.phase, FailurePhase::Settlement);
@@ -1762,13 +1782,40 @@ mod tests {
                 r#"{"type":"item.completed","item":{"type":"agent_message","text":"after-terminal"}}"#,
             ]),
         ] {
-            let error = settle_outcome(conflicting, None, Duration::ZERO, false)
+            let error = settle_outcome(conflicting, None, Duration::ZERO, false, false)
                 .expect_err("conflicting terminal state is settlement failure");
             assert_eq!(error.kind, ErrorKind::Provider);
             assert_eq!(error.phase, FailurePhase::Settlement);
             assert_eq!(error.effects, EffectState::Possible);
             assert!(error.evidence.is_none());
         }
+    }
+
+    #[test]
+    fn structured_outcome_selects_the_final_agent_message() {
+        let structured = query_result(&[
+            r#"{"type":"thread.started","thread_id":"thread-structured"}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"intermediate\"}"}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"answer\":\"final\"}"}}"#,
+            r#"{"type":"turn.completed"}"#,
+        ]);
+        assert_eq!(
+            structured.result,
+            r#"{"answer":"intermediate"}{"answer":"final"}"#
+        );
+
+        let outcome = settle_outcome(structured, None, Duration::ZERO, false, true)
+            .expect("structured completion selects one final message");
+        assert_eq!(outcome.output, r#"{"answer":"final"}"#);
+
+        let prose = query_result(&[
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"one "}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"two"}}"#,
+            r#"{"type":"turn.completed"}"#,
+        ]);
+        let outcome = settle_outcome(prose, None, Duration::ZERO, false, false)
+            .expect("prose completion retains aggregation semantics");
+        assert_eq!(outcome.output, "one two");
     }
 
     #[cfg(unix)]
