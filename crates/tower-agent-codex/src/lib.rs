@@ -279,6 +279,39 @@ impl CodexService {
         self.codex_home.as_deref()
     }
 
+    /// Check every validation-phase refusal for one turn without launching.
+    ///
+    /// This is the same code path `call` takes before any launch work: the
+    /// host authority policy, prompt and model checks, session handle
+    /// checks, resumed-directory support, directory encoding, output-schema
+    /// validation, and the service's skill-policy encoding. A turn that
+    /// passes preflight cannot be refused by `call` during the validation
+    /// phase.
+    ///
+    /// Preflight performs no I/O and spawns nothing. Two classes of refusal
+    /// deliberately remain call-time: checks that need call-local context
+    /// (Codex rejects a host-preassigned session from `CallContext`), and
+    /// launch-phase construction (child-environment resolution and binary
+    /// resolution).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tower_agent::Turn;
+    /// use tower_agent_codex::{CodexOptions, CodexService};
+    ///
+    /// let service = CodexService::new();
+    /// let turn = Turn::new("inspect this repository").with_options(CodexOptions::default());
+    /// assert!(service.preflight(&turn).is_ok());
+    ///
+    /// let blank = Turn::new("   ").with_options(CodexOptions::default());
+    /// assert!(service.preflight(&blank).is_err());
+    /// ```
+    pub fn preflight(&self, turn: &Turn<CodexOptions>) -> Result<(), AgentError> {
+        preflight_turn(&self.authority_policy, turn)?;
+        render_skill_config(&self.skill_policy).map(|_| ())
+    }
+
     fn build_codex(
         &self,
         working_directory: Option<&Path>,
@@ -458,7 +491,40 @@ fn prepare(
     }
 
     let turn = request.body;
-    authority_policy.authorize(&turn)?;
+    let validated = preflight_turn(authority_policy, &turn)?;
+
+    Ok((
+        PreparedTurn {
+            prompt: compose_prompt(&turn.prompt, turn.options.system_prompt.as_deref()),
+            working_directory: turn.working_directory,
+            session: validated.session,
+            model: turn.options.model,
+            additional_directories: validated.additional_directories,
+            output_schema: validated.output_schema,
+            filesystem_authority: turn.options.filesystem_authority,
+            ephemeral: turn.options.ephemeral,
+        },
+        cancellation,
+    ))
+}
+
+/// The owned artifacts produced by the validation-phase checks.
+struct ValidatedCodexTurn {
+    session: Option<String>,
+    additional_directories: Vec<String>,
+    output_schema: Option<Vec<u8>>,
+}
+
+/// Every validation-phase refusal decision for one turn, in one place.
+///
+/// `prepare` and [`CodexService::preflight`] both route through this
+/// function, so a turn that passes preflight cannot be refused by `call`
+/// during the validation phase.
+fn preflight_turn(
+    authority_policy: &AuthorityPolicy,
+    turn: &Turn<CodexOptions>,
+) -> Result<ValidatedCodexTurn, AgentError> {
+    authority_policy.authorize(turn)?;
     if turn.prompt.trim().is_empty() {
         return Err(AgentError::invalid_request("prompt must not be empty"));
     }
@@ -471,7 +537,7 @@ fn prepare(
         return Err(AgentError::invalid_request("Codex model must not be empty"));
     }
 
-    let session = match turn.session {
+    let session = match &turn.session {
         Some(session) if session.provider() != PROVIDER => {
             return Err(AgentError::unsupported(format!(
                 "cannot resume {} session with Codex service",
@@ -510,22 +576,15 @@ fn prepare(
     let output_schema = turn
         .options
         .output_schema
+        .clone()
         .map(validate_output_schema)
         .transpose()?;
 
-    Ok((
-        PreparedTurn {
-            prompt: compose_prompt(&turn.prompt, turn.options.system_prompt.as_deref()),
-            working_directory: turn.working_directory,
-            session,
-            model: turn.options.model,
-            additional_directories,
-            output_schema,
-            filesystem_authority: turn.options.filesystem_authority,
-            ephemeral: turn.options.ephemeral,
-        },
-        cancellation,
-    ))
+    Ok(ValidatedCodexTurn {
+        session,
+        additional_directories,
+        output_schema,
+    })
 }
 
 fn validate_output_schema(schema: serde_json::Value) -> Result<Vec<u8>, AgentError> {
@@ -2362,5 +2421,59 @@ mod error_mapping_tests {
                 mapped.message
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod preflight_parity_tests {
+    use tower::ServiceExt;
+    use tower_agent::{AgentRequest, FilesystemAuthority, SessionHandle, Turn};
+
+    use super::{CodexOptions, CodexService};
+
+    fn invalid_turns() -> Vec<Turn<CodexOptions>> {
+        vec![
+            Turn::new("   ").with_options(CodexOptions::default()),
+            Turn::new("hello").with_options(CodexOptions {
+                model: Some("  ".to_string()),
+                ..CodexOptions::default()
+            }),
+            Turn::new("hello")
+                .with_options(CodexOptions::default())
+                .resume(SessionHandle::new("claude", "abc")),
+            Turn::new("hello")
+                .with_options(CodexOptions::default())
+                .resume(SessionHandle::new("codex", "-rf")),
+            Turn::new("hello")
+                .with_options(CodexOptions {
+                    additional_directories: vec!["/tmp/a".into()],
+                    ..CodexOptions::default()
+                })
+                .resume(SessionHandle::new("codex", "abc")),
+            Turn::new("hello").with_options(CodexOptions {
+                filesystem_authority: FilesystemAuthority::WorkspaceWrite,
+                ..CodexOptions::default()
+            }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn preflight_refusals_match_call_refusals() {
+        for turn in invalid_turns() {
+            let service = CodexService::new();
+            let preflight = service.preflight(&turn).expect_err("preflight refuses");
+            let call = service
+                .oneshot(AgentRequest::new(turn))
+                .await
+                .expect_err("call refuses");
+            assert_eq!(preflight, call);
+        }
+    }
+
+    #[test]
+    fn preflight_accepts_a_valid_turn_without_any_launch_machinery() {
+        let service = CodexService::new().with_binary("/nonexistent/codex-binary");
+        let turn = Turn::new("hello").with_options(CodexOptions::default());
+        assert!(service.preflight(&turn).is_ok());
     }
 }
