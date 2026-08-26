@@ -15,6 +15,10 @@ use tower_agent::{
 };
 use tower_agent_claude::{ClaudeOptions, ClaudeService};
 use tower_agent_codex::{CodexOptions, CodexService};
+use tower_agent_plan::{
+    FilesystemChoice, Layers, PartialTurn, Prepared, Profile, ProviderId, RoutedTurnService,
+    prepare,
+};
 
 #[derive(Parser)]
 #[command(name = "agent", about = "run one finite agent turn")]
@@ -22,6 +26,11 @@ struct Cli {
     /// Provider CLI to invoke.
     #[arg(long, value_enum, default_value_t = Provider::Claude)]
     provider: Provider,
+    /// Resolve a saved JSON profile with the flags below, then route the
+    /// planned turn. Prints the remaining requirements instead of running
+    /// when the profile leaves values unbound.
+    #[arg(long)]
+    profile: Option<PathBuf>,
     /// User prompt for the turn.
     prompt: String,
     /// Working directory visible to the provider.
@@ -84,12 +93,79 @@ async fn main() -> anyhow::Result<()> {
         .with_cancellation(cancellation)
         .with_deadline(Instant::now() + Duration::from_secs(cli.timeout));
 
-    let outcome = match cli.provider {
-        Provider::Claude => run_claude(&cli, context).await?,
-        Provider::Codex => run_codex(&cli, context).await?,
+    let outcome = match &cli.profile {
+        Some(path) => match run_profile(&cli, path, context).await? {
+            Some(outcome) => outcome,
+            None => return Ok(()),
+        },
+        None => match cli.provider {
+            Provider::Claude => run_claude(&cli, context).await?,
+            Provider::Codex => run_codex(&cli, context).await?,
+        },
     };
     print_outcome(&outcome);
     Ok(())
+}
+
+/// Resolve a saved profile with the explicit flags, then route the result.
+///
+/// Returns `None` when planning stops short of a ready turn, having already
+/// reported the requirements or diagnostics that explain why.
+async fn run_profile(
+    cli: &Cli,
+    path: &PathBuf,
+    context: CallContext,
+) -> anyhow::Result<Option<TurnOutcome>> {
+    let text = std::fs::read_to_string(path)?;
+    let profile: Profile = serde_json::from_str(&text)?;
+
+    let mut explicit = PartialTurn {
+        provider: Some(match cli.provider {
+            Provider::Claude => ProviderId::Claude,
+            Provider::Codex => ProviderId::Codex,
+        }),
+        prompt: (!cli.prompt.is_empty()).then(|| cli.prompt.clone()),
+        ..Default::default()
+    };
+    explicit.model.name.clone_from(&cli.model);
+    explicit.context.cwd.clone_from(&cli.working_directory);
+    if !cli.additional_directories.is_empty() {
+        explicit.context.additional_directories = Some(cli.additional_directories.clone());
+    }
+    if cli.workspace_write {
+        explicit.permissions.filesystem = Some(FilesystemChoice::WorkspaceWrite);
+    }
+
+    match prepare(Layers::new(&explicit).with_profile(&profile)) {
+        Prepared::Ready(ready) => {
+            let router = RoutedTurnService::new()
+                .with_claude(stack(ClaudeService::new()))
+                .with_codex(stack(CodexService::new()));
+            let outcome = router
+                .oneshot(AgentRequest::with_context(ready, context))
+                .await?;
+            Ok(Some(outcome))
+        }
+        Prepared::Missing { requirements, .. } => {
+            eprintln!("profile {} needs more values:", profile.name);
+            for requirement in requirements {
+                eprintln!("  {} ({})", requirement.path, requirement.label);
+            }
+            Ok(None)
+        }
+        Prepared::Invalid { diagnostics } => {
+            eprintln!("profile {} cannot be planned:", profile.name);
+            for diagnostic in diagnostics {
+                match &diagnostic.path {
+                    Some(path) => {
+                        eprintln!("  {}: {} ({path})", diagnostic.code, diagnostic.message)
+                    }
+                    None => eprintln!("  {}: {}", diagnostic.code, diagnostic.message),
+                }
+            }
+            Ok(None)
+        }
+    }
 }
 
 async fn run_claude(
@@ -156,13 +232,24 @@ fn turn<O>(cli: &Cli, options: O) -> Turn<O> {
 
 fn stack<S, O>(
     service: S,
-) -> impl tower::Service<AgentRequest<Turn<O>>, Response = TurnOutcome, Error = tower_agent::AgentError>
+) -> impl tower::Service<
+    AgentRequest<Turn<O>>,
+    Response = TurnOutcome,
+    Error = tower_agent::AgentError,
+    Future: Send + 'static,
+> + Clone
++ Send
++ Sync
++ 'static
 where
     S: tower::Service<
             AgentRequest<Turn<O>>,
             Response = TurnOutcome,
             Error = tower_agent::AgentError,
-        > + Clone,
+        > + Clone
+        + Send
+        + Sync
+        + 'static,
     S::Future: Send + 'static,
     O: Send + 'static,
 {

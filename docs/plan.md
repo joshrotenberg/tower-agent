@@ -31,10 +31,17 @@ PartialTurn layers
     -> resolve                      pure, tower-agent-plan
 Complete | Missing | Invalid
     -> provider planner fold        pure, tower-agent-plan provider features
-Turn<ClaudeOptions> | Turn<CodexOptions>
-    -> routed provider service      tower-agent middleware and adapters
+    -> adapter preflight            pure, per configured service
+ReadyTurn: Turn<ClaudeOptions> | Turn<CodexOptions>
+    -> RoutedTurnService            tower-agent middleware and adapters
 TurnOutcome | AgentError
 ```
+
+Routing is the last planning-side step and the first execution-side one. It
+holds one configured service per provider, refuses an unregistered provider
+and a session whose tag disagrees with its committed provider, and never
+retries or falls back: an effectful failure must not reach a second
+provider.
 
 The compile target of planning is the typed portable turn body, never a
 process specification.
