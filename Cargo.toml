@@ -23,6 +23,7 @@ categories = ["asynchronous", "development-tools"]
 tower-agent = { path = "crates/tower-agent", version = "0.1.0" }
 tower-agent-claude = { path = "crates/tower-agent-claude", version = "0.1.0" }
 tower-agent-codex = { path = "crates/tower-agent-codex", version = "0.1.0" }
+tower-agent-plan = { path = "crates/tower-agent-plan" }
 
 anyhow = "1"
 claude-wrapper = "0.14"

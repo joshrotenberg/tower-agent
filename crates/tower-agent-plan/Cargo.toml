@@ -15,9 +15,11 @@ codex = ["dep:tower-agent-codex", "dep:serde_json"]
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
+tower = { workspace = true }
 tower-agent = { workspace = true }
 tower-agent-claude = { workspace = true, optional = true }
 tower-agent-codex = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tokio = { workspace = true }

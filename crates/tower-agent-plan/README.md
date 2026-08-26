@@ -19,6 +19,13 @@ effectful back half; this crate launches nothing.
 - Provider planners behind cargo features (`claude`, `codex`) fold a
   complete resolution into the adapter's concrete `Turn<O>`,
   honor-or-refuse. `ReadyTurn` is the provider-committed compile target.
+- Per-provider `preflight` helpers check a folded turn against one
+  configured service, so planner `Ready` means that service will not refuse
+  the turn during its validation phase.
+- `RoutedTurnService` dispatches a `ReadyTurn` to the service registered for
+  its provider. Resumed turns stay pinned to the provider that minted their
+  session, and a failure is never retried or replayed against another
+  provider.
 
 The compile target is always the typed portable turn body, never a process
 specification. Argv construction, environment policy, execution,
