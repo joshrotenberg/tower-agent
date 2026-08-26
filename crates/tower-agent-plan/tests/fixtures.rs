@@ -61,6 +61,14 @@ fn planning_codex_fixtures() {
     run_directory("tests/fixtures/planning_codex");
 }
 
+/// Claude resolution fixtures parse provider option groups that only exist
+/// under the `claude` feature, so they live in their own gated directory.
+#[cfg(feature = "claude")]
+#[test]
+fn planning_claude_fixtures() {
+    run_directory("tests/fixtures/planning_claude");
+}
+
 fn run_directory(relative: &str) {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
     let mut paths: Vec<PathBuf> = fs::read_dir(&directory)

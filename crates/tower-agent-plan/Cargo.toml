@@ -9,12 +9,14 @@ license.workspace = true
 repository.workspace = true
 
 [features]
+claude = ["dep:tower-agent-claude", "dep:serde_json"]
 codex = ["dep:tower-agent-codex", "dep:serde_json"]
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 tower-agent = { workspace = true }
+tower-agent-claude = { workspace = true, optional = true }
 tower-agent-codex = { workspace = true, optional = true }
 
 [dev-dependencies]
