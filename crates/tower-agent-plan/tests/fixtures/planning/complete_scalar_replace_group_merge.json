@@ -1,0 +1,29 @@
+{
+  "application_defaults": {
+    "model": { "name": "app-default-model" },
+    "context": { "cwd": "/repos/default" }
+  },
+  "profiles": {
+    "reviewer": {
+      "provider": "codex",
+      "context": { "additional_directories": ["/repos/shared"] }
+    }
+  },
+  "profile": "reviewer",
+  "explicit": {
+    "prompt": "review the current branch",
+    "model": { "name": "explicit-model" }
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "review the current branch",
+      "model": { "name": "explicit-model" },
+      "context": {
+        "cwd": "/repos/default",
+        "additional_directories": ["/repos/shared"]
+      }
+    }
+  }
+}

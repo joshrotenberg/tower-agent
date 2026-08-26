@@ -1,0 +1,10 @@
+{
+  "explicit": {
+    "provider": "codex",
+    "prompt": "   "
+  },
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["blank-prompt"]
+  }
+}

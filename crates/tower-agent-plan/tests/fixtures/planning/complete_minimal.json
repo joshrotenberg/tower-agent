@@ -1,0 +1,13 @@
+{
+  "explicit": {
+    "provider": "codex",
+    "prompt": "inspect this repository"
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "inspect this repository"
+    }
+  }
+}

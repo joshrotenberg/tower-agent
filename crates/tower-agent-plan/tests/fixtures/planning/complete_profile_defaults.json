@@ -1,0 +1,22 @@
+{
+  "profiles": {
+    "careful-codex": {
+      "provider": "codex",
+      "model": { "name": "gpt-5-codex" },
+      "permissions": { "filesystem": "workspace_write" }
+    }
+  },
+  "profile": "careful-codex",
+  "explicit": {
+    "prompt": "review the current branch"
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "review the current branch",
+      "model": { "name": "gpt-5-codex" },
+      "permissions": { "filesystem": "workspace_write" }
+    }
+  }
+}

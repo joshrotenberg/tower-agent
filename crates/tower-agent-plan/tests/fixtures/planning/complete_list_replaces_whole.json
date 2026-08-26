@@ -1,0 +1,21 @@
+{
+  "profiles": {
+    "reviewer": {
+      "provider": "codex",
+      "context": { "additional_directories": ["/repos/a", "/repos/b"] }
+    }
+  },
+  "profile": "reviewer",
+  "explicit": {
+    "prompt": "review the current branch",
+    "context": { "additional_directories": [] }
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "review the current branch",
+      "context": { "additional_directories": [] }
+    }
+  }
+}

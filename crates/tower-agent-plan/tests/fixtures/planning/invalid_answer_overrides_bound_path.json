@@ -1,0 +1,13 @@
+{
+  "explicit": {
+    "provider": "codex",
+    "prompt": "inspect this repository"
+  },
+  "answers": [
+    { "id": "prompt", "value": "a different prompt" }
+  ],
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["answer-overrides-bound-path"]
+  }
+}

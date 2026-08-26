@@ -1,0 +1,10 @@
+{
+  "explicit": {
+    "provider": "codex",
+    "model": { "name": "   " }
+  },
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["blank-model"]
+  }
+}
