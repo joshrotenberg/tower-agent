@@ -1,0 +1,27 @@
+{
+  "profiles": {
+    "careful-codex": {
+      "provider": "codex",
+      "provider_options": {
+        "codex": { "system_prompt": "be careful", "ephemeral": true }
+      }
+    }
+  },
+  "profile": "careful-codex",
+  "explicit": {
+    "prompt": "review the current branch",
+    "provider_options": {
+      "codex": { "ephemeral": false }
+    }
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "review the current branch",
+      "provider_options": {
+        "codex": { "system_prompt": "be careful", "ephemeral": false }
+      }
+    }
+  }
+}

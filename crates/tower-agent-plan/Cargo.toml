@@ -8,9 +8,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+codex = ["dep:tower-agent-codex", "dep:serde_json"]
+
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
 tower-agent = { workspace = true }
+tower-agent-codex = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -35,6 +35,9 @@ pub struct PartialTurn {
     /// Shared permission options.
     #[serde(skip_serializing_if = "PartialPermissions::is_unbound")]
     pub permissions: PartialPermissions,
+    /// Provider-specific option groups.
+    #[serde(skip_serializing_if = "PartialProviderOptions::is_unbound")]
+    pub provider_options: PartialProviderOptions,
 }
 
 impl PartialTurn {
@@ -52,6 +55,43 @@ impl PartialTurn {
         self.model.merge_from(&layer.model);
         self.context.merge_from(&layer.context);
         self.permissions.merge_from(&layer.permissions);
+        self.provider_options.merge_from(&layer.provider_options);
+    }
+}
+
+/// Provider-specific option groups.
+///
+/// Each group exists only when its provider feature is enabled, and each
+/// group merges fieldwise like the shared groups. A setting the shared
+/// vocabulary already carries never appears in a group, so no concrete
+/// option field is reachable from two planning paths.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PartialProviderOptions {
+    #[cfg(feature = "codex")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex: Option<crate::codex::PartialCodexOptions>,
+}
+
+impl PartialProviderOptions {
+    /// Whether no group in this layer is bound.
+    pub fn is_unbound(&self) -> bool {
+        #[cfg(feature = "codex")]
+        if self.codex.is_some() {
+            return false;
+        }
+        true
+    }
+
+    fn merge_from(&mut self, layer: &Self) {
+        #[cfg(feature = "codex")]
+        match (&mut self.codex, &layer.codex) {
+            (Some(current), Some(incoming)) => current.merge_from(incoming),
+            (current @ None, Some(incoming)) => *current = Some(incoming.clone()),
+            _ => {}
+        }
+        #[cfg(not(feature = "codex"))]
+        let _ = layer;
     }
 }
 

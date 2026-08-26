@@ -147,6 +147,7 @@ MCP adapter as downstream composition over the same typed service.
 crates/tower-agent          service types, fakes, and middleware
 crates/tower-agent-claude   Claude provider service
 crates/tower-agent-codex    Codex provider service
+crates/tower-agent-plan     planning vocabulary and layered resolver (unpublished)
 examples/agent              executable provider composition
 ```
 

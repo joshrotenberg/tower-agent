@@ -78,17 +78,23 @@
 //! assert_eq!(resolved.prompt(), "inspect this repository");
 //! ```
 
+#[cfg(feature = "codex")]
+pub mod codex;
 mod diagnostic;
 mod partial;
 mod provider;
+mod ready;
 mod requirement;
 mod resolve;
 
+#[cfg(feature = "codex")]
+pub use codex::PartialCodexOptions;
 pub use diagnostic::{Diagnostic, Severity, codes as diagnostic_codes};
 pub use partial::{
-    FilesystemChoice, PartialContext, PartialModel, PartialPermissions, PartialTurn, Profile,
-    ResumeBinding,
+    FilesystemChoice, PartialContext, PartialModel, PartialPermissions, PartialProviderOptions,
+    PartialTurn, Profile, ResumeBinding,
 };
 pub use provider::{ProviderId, UnknownProvider};
+pub use ready::{Prepared, ReadyTurn, compile, prepare};
 pub use requirement::{Answer, Requirement, RequirementReason, ValueKind, ids as requirement_ids};
 pub use resolve::{Layers, ProviderDefaults, Resolution, ResolvedTurn, resolve};

@@ -87,6 +87,22 @@ directory, additional directories, resume, and filesystem authority. A
 setting enters the shared vocabulary only when its semantics are genuinely
 shared; everything else stays in the provider option mirrors.
 
+A provider option mirror carries only what the shared vocabulary cannot
+express. A setting the shared vocabulary already carries never appears in a
+mirror, so no concrete option field is reachable from two planning paths
+with undefined precedence between them.
+
+## Alternate providers
+
+`ReadyTurn` is non-exhaustive and grows one feature-gated variant per
+provider planner. Nothing in the pipeline assumes a CLI-backed provider: a
+REST-backed provider adds an options type, a service implementing the same
+kernel contract, a planner fold, and a `ReadyTurn` variant. The seam to
+widen when a third provider lands is `ProviderId`, currently a closed enum;
+whether it stays an enum with more variants or becomes an open identifier is
+a decision for that provider's series, recorded here so it is not made by
+accident.
+
 ## Resume representation
 
 Planning layers carry `ResumeBinding`, a provider-tagged raw resume value, in
