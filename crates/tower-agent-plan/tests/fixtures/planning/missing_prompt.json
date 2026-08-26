@@ -1,0 +1,10 @@
+{
+  "explicit": {
+    "provider": "codex"
+  },
+  "expect": {
+    "status": "missing",
+    "requirements": ["prompt"],
+    "resolved": { "provider": "codex" }
+  }
+}

@@ -4,6 +4,7 @@ members = [
     "crates/tower-agent",
     "crates/tower-agent-claude",
     "crates/tower-agent-codex",
+    "crates/tower-agent-plan",
     "examples/agent",
 ]
 

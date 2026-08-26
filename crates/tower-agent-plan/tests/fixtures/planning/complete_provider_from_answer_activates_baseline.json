@@ -1,0 +1,19 @@
+{
+  "provider_defaults": {
+    "codex": { "context": { "cwd": "/repos/example" } }
+  },
+  "explicit": {
+    "prompt": "inspect this repository"
+  },
+  "answers": [
+    { "id": "provider", "value": "codex" }
+  ],
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "inspect this repository",
+      "context": { "cwd": "/repos/example" }
+    }
+  }
+}

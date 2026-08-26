@@ -1,0 +1,13 @@
+{
+  "explicit": {
+    "provider": "codex",
+    "prompt": "continue the review",
+    "context": {
+      "resume": { "provider": "codex", "value": "" }
+    }
+  },
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["empty-resume-value"]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "explicit": {
+    "prompt": "inspect this repository"
+  },
+  "answers": [
+    { "id": "provider", "value": "gemini" }
+  ],
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["invalid-provider-answer"]
+  }
+}

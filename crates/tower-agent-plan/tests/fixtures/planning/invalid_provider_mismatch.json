@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "careful-codex": { "provider": "codex" }
+  },
+  "profile": "careful-codex",
+  "explicit": {
+    "provider": "claude",
+    "prompt": "inspect this repository"
+  },
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["provider-mismatch"]
+  }
+}

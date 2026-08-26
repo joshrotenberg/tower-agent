@@ -1,0 +1,8 @@
+{
+  "explicit": {},
+  "expect": {
+    "status": "missing",
+    "requirements": ["provider", "prompt"],
+    "resolved": {}
+  }
+}

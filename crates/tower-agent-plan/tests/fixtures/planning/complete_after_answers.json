@@ -1,0 +1,14 @@
+{
+  "explicit": {},
+  "answers": [
+    { "id": "provider", "value": "codex" },
+    { "id": "prompt", "value": "inspect this repository" }
+  ],
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "inspect this repository"
+    }
+  }
+}

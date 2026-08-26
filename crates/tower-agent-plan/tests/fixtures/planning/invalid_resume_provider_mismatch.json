@@ -1,0 +1,13 @@
+{
+  "explicit": {
+    "provider": "codex",
+    "prompt": "continue the review",
+    "context": {
+      "resume": { "provider": "claude", "value": "0199a213-81ef-7623-8004-e2f7469d612d" }
+    }
+  },
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["resume-provider-mismatch"]
+  }
+}

@@ -9,4 +9,9 @@ if printf '%s\n' "$tree" | grep -Eq '^tower-mcp v'; then
     exit 1
 fi
 
+if printf '%s\n' "$tree" | grep -Eq '^tower-agent-plan v'; then
+    printf '%s\n' "tower-agent must not depend on the planning crate"
+    exit 1
+fi
+
 printf '%s\n' "core dependency boundary is clean"

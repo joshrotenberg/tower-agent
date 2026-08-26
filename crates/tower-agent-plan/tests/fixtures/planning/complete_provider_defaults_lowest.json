@@ -1,0 +1,20 @@
+{
+  "provider_defaults": {
+    "codex": { "model": { "name": "provider-baseline-model" } }
+  },
+  "application_defaults": {
+    "model": { "name": "app-default-model" }
+  },
+  "explicit": {
+    "provider": "codex",
+    "prompt": "inspect this repository"
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "inspect this repository",
+      "model": { "name": "app-default-model" }
+    }
+  }
+}

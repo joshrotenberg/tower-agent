@@ -1,0 +1,13 @@
+{
+  "explicit": {
+    "provider": "codex",
+    "prompt": "continue the review",
+    "context": {
+      "resume": { "provider": "codex", "value": "-rf" }
+    }
+  },
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["hyphen-resume-value"]
+  }
+}

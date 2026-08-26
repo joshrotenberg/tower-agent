@@ -1,0 +1,12 @@
+{
+  "explicit": {
+    "provider": "codex"
+  },
+  "answers": [
+    { "id": "model.name", "value": "gpt-5-codex" }
+  ],
+  "expect": {
+    "status": "invalid",
+    "diagnostics": ["unknown-requirement"]
+  }
+}
