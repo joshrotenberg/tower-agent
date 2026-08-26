@@ -19,6 +19,28 @@ pub enum ReadyTurn {
     Codex(tower_agent::Turn<tower_agent_codex::CodexOptions>),
 }
 
+impl ReadyTurn {
+    /// The provider this turn is committed to.
+    #[cfg(any(feature = "claude", feature = "codex"))]
+    pub fn provider(&self) -> crate::provider::ProviderId {
+        match self {
+            #[cfg(feature = "claude")]
+            Self::Claude(_) => crate::provider::ProviderId::Claude,
+            #[cfg(feature = "codex")]
+            Self::Codex(_) => crate::provider::ProviderId::Codex,
+        }
+    }
+
+    /// The provider this turn is committed to.
+    ///
+    /// With no provider feature enabled the type has no variants, so no
+    /// value of it can exist to call this on.
+    #[cfg(not(any(feature = "claude", feature = "codex")))]
+    pub fn provider(&self) -> crate::provider::ProviderId {
+        match *self {}
+    }
+}
+
 /// Compile a complete resolution into a provider-committed turn.
 ///
 /// A provider without an enabled planner is an `unsupported-provider`

@@ -9,9 +9,10 @@
 //! PartialTurn layers
 //!     -> resolve
 //! Complete | Missing(requirements) | Invalid(diagnostics)
-//!     -> provider planner fold (provider features, later parts)
-//! Turn<O>
-//!     -> tower-agent middleware and provider service
+//!     -> provider planner fold
+//! ReadyTurn (a provider-committed Turn<O>)
+//!     -> RoutedTurnService
+//! tower-agent middleware and the provider service
 //! ```
 //!
 //! The compile target of planning is the typed portable turn body, never a
@@ -100,6 +101,8 @@ mod provider;
 mod ready;
 mod requirement;
 mod resolve;
+#[cfg(any(feature = "claude", feature = "codex"))]
+mod router;
 
 #[cfg(feature = "claude")]
 pub use claude::PartialClaudeOptions;
@@ -114,3 +117,5 @@ pub use provider::{ProviderId, UnknownProvider};
 pub use ready::{Prepared, ReadyTurn, compile, prepare};
 pub use requirement::{Answer, Requirement, RequirementReason, ValueKind, ids as requirement_ids};
 pub use resolve::{Layers, ProviderDefaults, Resolution, ResolvedTurn, resolve};
+#[cfg(any(feature = "claude", feature = "codex"))]
+pub use router::RoutedTurnService;
