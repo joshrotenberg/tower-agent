@@ -18,6 +18,21 @@ pub mod codes {
     pub const UNSUPPORTED_PROVIDER: &str = "unsupported-provider";
     pub const RESUMED_ADDITIONAL_DIRECTORIES: &str = "resumed-additional-directories";
     pub const UNSUPPORTED_FILESYSTEM_PERMISSION: &str = "unsupported-filesystem-permission";
+    pub const ADAPTER_REFUSAL: &str = "adapter-refusal";
+}
+
+/// Translate an adapter preflight refusal into a planning diagnostic.
+///
+/// The adapter's typed error stays the source of truth; the diagnostic
+/// carries its category and fixed message text, which the adapters already
+/// keep free of prompts, session values, and other bound data.
+#[cfg(any(feature = "claude", feature = "codex"))]
+pub(crate) fn adapter_refusal(error: tower_agent::AgentError) -> Diagnostic {
+    Diagnostic::error(
+        codes::ADAPTER_REFUSAL,
+        None,
+        format!("adapter refused the turn: {error}"),
+    )
 }
 
 /// One structured planning diagnostic.

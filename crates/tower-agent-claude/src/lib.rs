@@ -241,6 +241,45 @@ impl ClaudeService {
         self.ambient_context
     }
 
+    /// Check every validation-phase refusal for one turn without launching.
+    ///
+    /// This is the same code path `call` takes before any launch work: the
+    /// prompt and session handle checks, the combination of the service's
+    /// host ambient-context baseline with the requested turn mode, and every
+    /// option check performed while the query is built (model, fallback
+    /// model, turn cap, tool patterns, budget, JSON schema, and directory
+    /// encoding). A turn that passes preflight cannot be refused by `call`
+    /// during the validation phase.
+    ///
+    /// Preflight performs no I/O and spawns nothing. Two classes of refusal
+    /// deliberately remain call-time: checks that need call-local context
+    /// (host-preassigned session validation from `CallContext`), and
+    /// launch-phase construction (child-environment resolution and binary
+    /// resolution).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tower_agent::Turn;
+    /// use tower_agent_claude::{ClaudeOptions, ClaudeService};
+    ///
+    /// let service = ClaudeService::new();
+    /// let turn = Turn::new("inspect this repository").with_options(ClaudeOptions::default());
+    /// assert!(service.preflight(&turn).is_ok());
+    ///
+    /// let invalid = Turn::new("inspect this repository").with_options(ClaudeOptions {
+    ///     max_turns: Some(0),
+    ///     ..ClaudeOptions::default()
+    /// });
+    /// assert!(service.preflight(&invalid).is_err());
+    /// ```
+    pub fn preflight(&self, turn: &Turn<ClaudeOptions>) -> Result<(), AgentError> {
+        preflight_session(turn)?;
+        let ambient_context =
+            effective_ambient_context(self.ambient_context, turn.options.ambient_context)?;
+        build_query(turn, ambient_context, None).map(|_| ())
+    }
+
     fn build_claude(
         &self,
         working_directory: Option<&Path>,
@@ -316,47 +355,8 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
         if request.context.cancellation().is_cancelled() {
             return Box::pin(async { Err(cancelled_before_launch()) });
         }
-        if request.body.prompt.trim().is_empty() {
-            return Box::pin(async {
-                Err(AgentError::invalid_request("prompt must not be empty"))
-            });
-        }
-        if let Some(session) = &request.body.session
-            && session.provider() != PROVIDER
-        {
-            let found = session.provider().to_string();
-            return Box::pin(async move {
-                Err(AgentError::new(
-                    ErrorKind::Unsupported,
-                    format!("cannot resume {found} session with Claude service"),
-                    FailurePhase::Validation,
-                    EffectState::None,
-                ))
-            });
-        }
-        if request
-            .body
-            .session
-            .as_ref()
-            .is_some_and(|session| session.value().trim().is_empty())
-        {
-            return Box::pin(async {
-                Err(AgentError::invalid_request(
-                    "Claude session handle must not be empty",
-                ))
-            });
-        }
-        if request
-            .body
-            .session
-            .as_ref()
-            .is_some_and(|session| session.value().starts_with('-'))
-        {
-            return Box::pin(async {
-                Err(AgentError::invalid_request(
-                    "Claude session handle must not begin with a hyphen",
-                ))
-            });
+        if let Err(error) = preflight_session(&request.body) {
+            return Box::pin(async move { Err(error) });
         }
         let preassigned_session = match validate_preassigned_session(&request) {
             Ok(session) => session,
@@ -438,6 +438,38 @@ fn validate_preassigned_session(
         ));
     }
     Ok(Some(SessionHandle::new(PROVIDER, canonical)))
+}
+
+/// The prompt and session checks shared by `call` and
+/// [`ClaudeService::preflight`].
+fn preflight_session(turn: &Turn<ClaudeOptions>) -> Result<(), AgentError> {
+    if turn.prompt.trim().is_empty() {
+        return Err(AgentError::invalid_request("prompt must not be empty"));
+    }
+    if let Some(session) = &turn.session {
+        if session.provider() != PROVIDER {
+            return Err(AgentError::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "cannot resume {} session with Claude service",
+                    session.provider()
+                ),
+                FailurePhase::Validation,
+                EffectState::None,
+            ));
+        }
+        if session.value().trim().is_empty() {
+            return Err(AgentError::invalid_request(
+                "Claude session handle must not be empty",
+            ));
+        }
+        if session.value().starts_with('-') {
+            return Err(AgentError::invalid_request(
+                "Claude session handle must not begin with a hyphen",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn effective_ambient_context(
@@ -1744,5 +1776,80 @@ mod tests {
                 "process {pid} survived terminal settlement with state {state:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod preflight_parity_tests {
+    use tower::ServiceExt;
+    use tower_agent::{AgentRequest, SessionHandle, Turn};
+
+    use super::{ClaudeAmbientContext, ClaudeOptions, ClaudeService};
+
+    fn invalid_turns() -> Vec<Turn<ClaudeOptions>> {
+        vec![
+            Turn::new("   ").with_options(ClaudeOptions::default()),
+            Turn::new("hello")
+                .with_options(ClaudeOptions::default())
+                .resume(SessionHandle::new("codex", "abc")),
+            Turn::new("hello")
+                .with_options(ClaudeOptions::default())
+                .resume(SessionHandle::new("claude", "-rf")),
+            Turn::new("hello").with_options(ClaudeOptions {
+                model: Some("  ".to_string()),
+                ..ClaudeOptions::default()
+            }),
+            Turn::new("hello").with_options(ClaudeOptions {
+                max_turns: Some(0),
+                ..ClaudeOptions::default()
+            }),
+            Turn::new("hello").with_options(ClaudeOptions {
+                allowed_tools: vec!["  ".to_string()],
+                ..ClaudeOptions::default()
+            }),
+            Turn::new("hello").with_options(ClaudeOptions {
+                max_budget_usd: Some(0.0),
+                ..ClaudeOptions::default()
+            }),
+            Turn::new("hello").with_options(ClaudeOptions {
+                json_schema: Some("  ".to_string()),
+                ..ClaudeOptions::default()
+            }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn preflight_refusals_match_call_refusals() {
+        for turn in invalid_turns() {
+            let service = ClaudeService::new();
+            let preflight = service.preflight(&turn).expect_err("preflight refuses");
+            let call = service
+                .oneshot(AgentRequest::new(turn))
+                .await
+                .expect_err("call refuses");
+            assert_eq!(preflight, call);
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_matches_call_for_an_ambient_baseline_conflict() {
+        let turn = Turn::new("hello").with_options(ClaudeOptions {
+            ambient_context: ClaudeAmbientContext::Bare,
+            ..ClaudeOptions::default()
+        });
+        let service = ClaudeService::new().with_ambient_context_policy(ClaudeAmbientContext::Safe);
+        let preflight = service.preflight(&turn).expect_err("preflight refuses");
+        let call = service
+            .oneshot(AgentRequest::new(turn))
+            .await
+            .expect_err("call refuses");
+        assert_eq!(preflight, call);
+    }
+
+    #[test]
+    fn preflight_accepts_a_valid_turn_without_any_launch_machinery() {
+        let service = ClaudeService::new().with_binary("/nonexistent/claude-binary");
+        let turn = Turn::new("hello").with_options(ClaudeOptions::default());
+        assert!(service.preflight(&turn).is_ok());
     }
 }
