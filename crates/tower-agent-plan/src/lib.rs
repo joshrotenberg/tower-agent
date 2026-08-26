@@ -20,6 +20,18 @@
 //! and the kernel middleware; this crate launches nothing and owns no
 //! post-execution behavior.
 //!
+//! # Feature flags
+//!
+//! Provider planners are opt-in features, each pulling in only its own
+//! adapter crate:
+//!
+//! - `claude`: the Claude planner and [`PartialClaudeOptions`].
+//! - `codex`: the Codex planner and [`PartialCodexOptions`].
+//!
+//! With no provider features enabled the crate still resolves, and
+//! [`compile`] refuses every provider with an `unsupported-provider`
+//! diagnostic.
+//!
 //! # Precedence and merge laws
 //!
 //! Layers merge from lowest to highest precedence: provider baseline
@@ -78,6 +90,8 @@
 //! assert_eq!(resolved.prompt(), "inspect this repository");
 //! ```
 
+#[cfg(feature = "claude")]
+pub mod claude;
 #[cfg(feature = "codex")]
 pub mod codex;
 mod diagnostic;
@@ -87,6 +101,8 @@ mod ready;
 mod requirement;
 mod resolve;
 
+#[cfg(feature = "claude")]
+pub use claude::PartialClaudeOptions;
 #[cfg(feature = "codex")]
 pub use codex::PartialCodexOptions;
 pub use diagnostic::{Diagnostic, Severity, codes as diagnostic_codes};

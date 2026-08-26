@@ -1,0 +1,36 @@
+{
+  "profiles": {
+    "careful-claude": {
+      "provider": "claude",
+      "provider_options": {
+        "claude": {
+          "system_prompt": "be careful",
+          "max_turns": 5,
+          "permission_mode": "plan"
+        }
+      }
+    }
+  },
+  "profile": "careful-claude",
+  "explicit": {
+    "prompt": "review the current branch",
+    "provider_options": {
+      "claude": { "max_turns": 2, "strict_mcp_config": true }
+    }
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "claude",
+      "prompt": "review the current branch",
+      "provider_options": {
+        "claude": {
+          "system_prompt": "be careful",
+          "max_turns": 2,
+          "permission_mode": "plan",
+          "strict_mcp_config": true
+        }
+      }
+    }
+  }
+}

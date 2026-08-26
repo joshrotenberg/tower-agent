@@ -16,7 +16,7 @@ use crate::ProviderId;
 /// This is the wire-shaped planning DTO, not the portable execution body. A
 /// complete resolution folds into the kernel's `Turn<O>` through a provider
 /// planner; the kernel types never gain serde obligations from this crate.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PartialTurn {
     /// Selected provider. A profile/explicit mismatch is invalid, never an
@@ -65,9 +65,12 @@ impl PartialTurn {
 /// group merges fieldwise like the shared groups. A setting the shared
 /// vocabulary already carries never appears in a group, so no concrete
 /// option field is reachable from two planning paths.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PartialProviderOptions {
+    #[cfg(feature = "claude")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude: Option<crate::claude::PartialClaudeOptions>,
     #[cfg(feature = "codex")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex: Option<crate::codex::PartialCodexOptions>,
@@ -76,6 +79,10 @@ pub struct PartialProviderOptions {
 impl PartialProviderOptions {
     /// Whether no group in this layer is bound.
     pub fn is_unbound(&self) -> bool {
+        #[cfg(feature = "claude")]
+        if self.claude.is_some() {
+            return false;
+        }
         #[cfg(feature = "codex")]
         if self.codex.is_some() {
             return false;
@@ -84,13 +91,19 @@ impl PartialProviderOptions {
     }
 
     fn merge_from(&mut self, layer: &Self) {
+        #[cfg(feature = "claude")]
+        match (&mut self.claude, &layer.claude) {
+            (Some(current), Some(incoming)) => current.merge_from(incoming),
+            (current @ None, Some(incoming)) => *current = Some(incoming.clone()),
+            _ => {}
+        }
         #[cfg(feature = "codex")]
         match (&mut self.codex, &layer.codex) {
             (Some(current), Some(incoming)) => current.merge_from(incoming),
             (current @ None, Some(incoming)) => *current = Some(incoming.clone()),
             _ => {}
         }
-        #[cfg(not(feature = "codex"))]
+        #[cfg(not(any(feature = "claude", feature = "codex")))]
         let _ = layer;
     }
 }
@@ -260,7 +273,7 @@ impl fmt::Debug for ResumeBinding {
 ///
 /// A profile may be complete, but completeness is not part of its identity.
 /// The requirements remaining after resolution are its effective signature.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub name: String,

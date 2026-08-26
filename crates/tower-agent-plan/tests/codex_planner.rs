@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use tower_agent::FilesystemAuthority;
 use tower_agent_plan::{
     Answer, FilesystemChoice, Layers, PartialCodexOptions, PartialTurn, Prepared, Profile,
-    ProviderId, ReadyTurn, Resolution, ResumeBinding, compile, diagnostic_codes, prepare, resolve,
+    ProviderId, ReadyTurn, ResumeBinding, diagnostic_codes, prepare,
 };
 
 fn codex_turn(explicit: &PartialTurn) -> tower_agent::Turn<tower_agent_codex::CodexOptions> {
@@ -135,8 +135,13 @@ fn resumed_with_empty_directory_list_is_ready() {
     assert!(turn.options.additional_directories.is_empty());
 }
 
+/// With the claude feature enabled the claude planner handles this provider,
+/// so the case only exists in codex-only builds.
+#[cfg(not(feature = "claude"))]
 #[test]
 fn unplanned_provider_is_an_unsupported_diagnostic() {
+    use tower_agent_plan::{Resolution, compile, resolve};
+
     let explicit = PartialTurn {
         provider: Some(ProviderId::Claude),
         prompt: Some("inspect this repository".to_string()),
@@ -154,21 +159,20 @@ fn unplanned_provider_is_an_unsupported_diagnostic() {
 
 #[test]
 fn prepare_composes_profile_and_answers_end_to_end() {
+    let mut profile_turn = PartialTurn {
+        provider: Some(ProviderId::Codex),
+        permissions: tower_agent_plan::PartialPermissions {
+            filesystem: Some(FilesystemChoice::WorkspaceWrite),
+        },
+        ..Default::default()
+    };
+    profile_turn.provider_options.codex = Some(PartialCodexOptions {
+        ephemeral: Some(true),
+        ..Default::default()
+    });
     let profile = Profile {
         name: "careful-codex".to_string(),
-        turn: PartialTurn {
-            provider: Some(ProviderId::Codex),
-            permissions: tower_agent_plan::PartialPermissions {
-                filesystem: Some(FilesystemChoice::WorkspaceWrite),
-            },
-            provider_options: tower_agent_plan::PartialProviderOptions {
-                codex: Some(PartialCodexOptions {
-                    ephemeral: Some(true),
-                    ..Default::default()
-                }),
-            },
-            ..Default::default()
-        },
+        turn: profile_turn,
     };
 
     let explicit = PartialTurn::default();

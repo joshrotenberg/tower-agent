@@ -13,6 +13,8 @@ use crate::resolve::{Layers, Resolution, ResolvedTurn, resolve};
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum ReadyTurn {
+    #[cfg(feature = "claude")]
+    Claude(tower_agent::Turn<tower_agent_claude::ClaudeOptions>),
     #[cfg(feature = "codex")]
     Codex(tower_agent::Turn<tower_agent_codex::CodexOptions>),
 }
@@ -23,8 +25,13 @@ pub enum ReadyTurn {
 /// diagnostic, never a fallback to another provider.
 pub fn compile(resolved: &ResolvedTurn) -> Result<ReadyTurn, Vec<Diagnostic>> {
     match resolved.provider() {
+        #[cfg(feature = "claude")]
+        crate::provider::ProviderId::Claude => crate::claude::plan(resolved).map(ReadyTurn::Claude),
         #[cfg(feature = "codex")]
         crate::provider::ProviderId::Codex => crate::codex::plan(resolved).map(ReadyTurn::Codex),
+        // Reachable only in builds with a provider feature disabled;
+        // providers stay an open set.
+        #[allow(unreachable_patterns)]
         other => Err(vec![Diagnostic::error(
             codes::UNSUPPORTED_PROVIDER,
             Some("provider"),
@@ -52,6 +59,18 @@ pub enum Prepared {
 ///
 /// This is the ordinary high-level entry point. [`resolve`] and [`compile`]
 /// stay independently callable and testable.
+///
+/// # Example
+///
+/// ```
+/// use tower_agent_plan::{Layers, PartialTurn, Prepared, prepare};
+///
+/// let explicit = PartialTurn::default();
+/// let Prepared::Missing { requirements, .. } = prepare(Layers::new(&explicit)) else {
+///     panic!("nothing is bound yet");
+/// };
+/// assert_eq!(requirements[0].id, "provider");
+/// ```
 pub fn prepare(layers: Layers<'_>) -> Prepared {
     match resolve(layers) {
         Resolution::Complete(resolved) => match compile(&resolved) {

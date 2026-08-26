@@ -17,6 +17,7 @@ pub mod codes {
     pub const INVALID_PROVIDER_ANSWER: &str = "invalid-provider-answer";
     pub const UNSUPPORTED_PROVIDER: &str = "unsupported-provider";
     pub const RESUMED_ADDITIONAL_DIRECTORIES: &str = "resumed-additional-directories";
+    pub const UNSUPPORTED_FILESYSTEM_PERMISSION: &str = "unsupported-filesystem-permission";
 }
 
 /// One structured planning diagnostic.

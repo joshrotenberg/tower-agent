@@ -92,6 +92,19 @@ express. A setting the shared vocabulary already carries never appears in a
 mirror, so no concrete option field is reachable from two planning paths
 with undefined precedence between them.
 
+The two-provider pressure test settled three candidate promotions:
+
+- `system_prompt` stays provider-typed. Claude has a real system-prompt
+  control with replace and append forms; Codex simulates one by prepending
+  to the stdin prompt. A shared field would promise semantics only one
+  provider honors.
+- `effort` stays provider-typed. The Codex adapter does not expose an
+  effort control, so a shared field would be Claude-only in practice.
+- Tool allow/deny lists stay provider-typed. They are Claude-specific
+  patterns, and the architecture already forbids presenting them as a
+  portable sandbox; `permissions.filesystem` is refused for Claude for the
+  same reason.
+
 ## Alternate providers
 
 `ReadyTurn` is non-exhaustive and grows one feature-gated variant per

@@ -1,0 +1,27 @@
+{
+  "profiles": {
+    "reader": {
+      "provider": "claude",
+      "provider_options": {
+        "claude": { "allowed_tools": ["Read", "Grep"] }
+      }
+    }
+  },
+  "profile": "reader",
+  "explicit": {
+    "prompt": "inspect this repository",
+    "provider_options": {
+      "claude": { "allowed_tools": [] }
+    }
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "claude",
+      "prompt": "inspect this repository",
+      "provider_options": {
+        "claude": { "allowed_tools": [] }
+      }
+    }
+  }
+}
