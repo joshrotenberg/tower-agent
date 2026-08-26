@@ -173,6 +173,32 @@ impl From<AmbientContextChoice> for ClaudeAmbientContext {
     }
 }
 
+/// Check a folded turn against one configured service without launching.
+///
+/// [`crate::compile`] proves the fold is representable; this proves the
+/// specific configured service will not refuse the turn during its
+/// validation phase (ambient-context baseline combination and every option
+/// check). An adapter refusal becomes an `adapter-refusal` diagnostic.
+///
+/// # Example
+///
+/// ```
+/// use tower_agent::Turn;
+/// use tower_agent_claude::{ClaudeOptions, ClaudeService};
+///
+/// let service = ClaudeService::new();
+/// let turn = Turn::new("inspect this repository").with_options(ClaudeOptions::default());
+/// assert!(tower_agent_plan::claude::preflight(&service, &turn).is_ok());
+/// ```
+pub fn preflight(
+    service: &tower_agent_claude::ClaudeService,
+    turn: &Turn<ClaudeOptions>,
+) -> Result<(), Diagnostic> {
+    service
+        .preflight(turn)
+        .map_err(crate::diagnostic::adapter_refusal)
+}
+
 /// Fold a complete resolution into a concrete Claude turn.
 pub fn plan(resolved: &ResolvedTurn) -> Result<Turn<ClaudeOptions>, Vec<Diagnostic>> {
     if resolved.provider() != ProviderId::Claude {

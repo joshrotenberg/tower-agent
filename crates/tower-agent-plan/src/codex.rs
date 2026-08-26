@@ -51,6 +51,32 @@ impl PartialCodexOptions {
     }
 }
 
+/// Check a folded turn against one configured service without launching.
+///
+/// [`crate::compile`] proves the fold is representable; this proves the
+/// specific configured service will not refuse the turn during its
+/// validation phase (authority ceiling, option checks, skill-policy
+/// encoding). An adapter refusal becomes an `adapter-refusal` diagnostic.
+///
+/// # Example
+///
+/// ```
+/// use tower_agent::Turn;
+/// use tower_agent_codex::{CodexOptions, CodexService};
+///
+/// let service = CodexService::new();
+/// let turn = Turn::new("inspect this repository").with_options(CodexOptions::default());
+/// assert!(tower_agent_plan::codex::preflight(&service, &turn).is_ok());
+/// ```
+pub fn preflight(
+    service: &tower_agent_codex::CodexService,
+    turn: &Turn<CodexOptions>,
+) -> Result<(), Diagnostic> {
+    service
+        .preflight(turn)
+        .map_err(crate::diagnostic::adapter_refusal)
+}
+
 /// Fold a complete resolution into a concrete Codex turn.
 pub fn plan(resolved: &ResolvedTurn) -> Result<Turn<CodexOptions>, Vec<Diagnostic>> {
     if resolved.provider() != ProviderId::Codex {
