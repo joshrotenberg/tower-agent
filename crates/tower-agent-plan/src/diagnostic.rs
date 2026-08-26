@@ -15,6 +15,8 @@ pub mod codes {
     pub const UNKNOWN_REQUIREMENT: &str = "unknown-requirement";
     pub const ANSWER_OVERRIDES_BOUND_PATH: &str = "answer-overrides-bound-path";
     pub const INVALID_PROVIDER_ANSWER: &str = "invalid-provider-answer";
+    pub const UNSUPPORTED_PROVIDER: &str = "unsupported-provider";
+    pub const RESUMED_ADDITIONAL_DIRECTORIES: &str = "resumed-additional-directories";
 }
 
 /// One structured planning diagnostic.

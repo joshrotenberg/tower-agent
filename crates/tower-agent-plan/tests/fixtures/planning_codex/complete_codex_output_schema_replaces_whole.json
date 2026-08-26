@@ -1,0 +1,30 @@
+{
+  "application_defaults": {
+    "provider_options": {
+      "codex": {
+        "output_schema": { "type": "object", "properties": { "summary": { "type": "string" } } }
+      }
+    }
+  },
+  "explicit": {
+    "provider": "codex",
+    "prompt": "summarize the diff",
+    "provider_options": {
+      "codex": {
+        "output_schema": { "type": "object", "properties": { "verdict": { "type": "string" } } }
+      }
+    }
+  },
+  "expect": {
+    "status": "complete",
+    "resolved": {
+      "provider": "codex",
+      "prompt": "summarize the diff",
+      "provider_options": {
+        "codex": {
+          "output_schema": { "type": "object", "properties": { "verdict": { "type": "string" } } }
+        }
+      }
+    }
+  }
+}
