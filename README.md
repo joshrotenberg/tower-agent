@@ -69,6 +69,8 @@ ordinary request/response RPCs:
 | `SuperviseLayer` | Keeps polling an owned call after its interface caller disappears. |
 | `CatchPanicLayer` | Converts provider call panics into typed terminal failure. |
 | `AuthorityLayer` | Rejects a turn requesting more filesystem authority than the host ceiling allows. |
+| `LimitOutputLayer` | Refuses a terminal output larger than the host allows, rather than truncating it. |
+| `FaultLayer` | Injects scripted faults so cancellation and late settlement are testable. Inert unless scripted. |
 
 A representative outside-to-inside stack is:
 

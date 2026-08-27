@@ -396,6 +396,30 @@ automatic replay. Without an idempotency contract, only `EffectState::None`
 permits an automatic retry; a deterministic error classification alone does
 not prove that an earlier step in the turn produced no effects.
 
+## Testing the invariants
+
+Cancellation and settlement bugs surface only when a provider stalls, settles
+late, or fails after it has already acted. A provider that answers instantly
+cannot produce any of those, which is why several of the failures found in
+this crate were noticed by accident rather than by a test.
+
+`FaultLayer` makes them reproducible. Faults come from an explicit queue
+consumed in order, one per call, with no randomness and no seed, so a failing
+test names the exact fault that produced it. An empty queue passes every call
+through, so the layer is inert unless a test asks for something.
+
+Faults are described relative to launch, because that is the line the effect
+rules are drawn against. A refusal before launch never reaches the inner
+service, so it may honestly report no effects. A failure injected after
+settlement takes its effect state and evidence from what actually settled, so
+it cannot claim less about effects than the call it wrapped: a successful
+settlement proves the turn ran, and a failed one already carries its own
+reading.
+
+It lives in the public API rather than behind `cfg(test)` because the adapter
+crates need it from their own suites, and a test-only item is not reachable
+across a crate boundary.
+
 ## Service laws
 
 Tests should preserve these properties:
