@@ -116,6 +116,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "apalis-codec"
+version = "0.1.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c506e7f00c7c9c38eeb02290b3ec6328695f0614a257faefaeb8e8286746a665"
+dependencies = [
+ "apalis-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "apalis-core"
 version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,11 +135,45 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-sink",
+ "futures-timer",
  "futures-util",
  "pin-project",
+ "serde",
  "thiserror",
  "tower-layer",
  "tower-service",
+]
+
+[[package]]
+name = "apalis-durable-example"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apalis",
+ "apalis-file-storage",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-agent",
+ "tower-agent-workflow",
+]
+
+[[package]]
+name = "apalis-file-storage"
+version = "0.1.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80f380e1e766fa9c0abb63a192f01db4e8244fa94d32c5c0194974bb68df598c"
+dependencies = [
+ "apalis-codec",
+ "apalis-core",
+ "futures-channel",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -460,6 +505,12 @@ name = "futures-task"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109"
+
+[[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
 
 [[package]]
 name = "futures-util"
