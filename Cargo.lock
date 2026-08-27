@@ -1426,6 +1426,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tower-agent-workflow"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-agent",
+]
+
+[[package]]
 name = "tower-layer"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

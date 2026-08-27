@@ -133,6 +133,9 @@ async fn exact_turn_outcome_metadata_survives_a_pipeline_dependency() {
         .expect("pipeline is valid");
     let expected = TurnOutcome {
         output: "structured research".into(),
+        // No schema was requested, so the provider returned no structured
+        // payload. Added when TurnOutcome gained the field.
+        structured: None,
         session: Some(SessionHandle::new("fake-metadata", "session-42")),
         usage: Some(TokenUsage {
             input: Some(11),

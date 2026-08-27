@@ -1241,7 +1241,12 @@ mod tests {
         assert!((minimum_failures..=maximum_failures).contains(&failures.len()));
         for settled in failures {
             assert_eq!(settled.error.kind, ErrorKind::Cancelled);
-            assert_eq!(settled.error.phase, FailurePhase::Running);
+            // Admission, not Running. A step cancelled during graceful stop
+            // is refused before its provider is launched, and the pairing
+            // asserted here previously (Running with no effects) was the
+            // incoherence the core corrected: reaching Running means the
+            // provider was reached, which forbids claiming nothing happened.
+            assert_eq!(settled.error.phase, FailurePhase::Admission);
             assert_eq!(settled.error.effects, EffectState::None);
         }
     }
