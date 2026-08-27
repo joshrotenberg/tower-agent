@@ -38,6 +38,9 @@ jobs:
       - name: Check core dependency boundary
         run: ./scripts/check-core-deps.sh
 
+      - name: Check license files
+        run: ./scripts/check-license-files.sh
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
@@ -68,6 +71,7 @@ jobs:
           -p tower-agent
           -p tower-agent-claude
           -p tower-agent-codex
+          -p tower-agent-workflow
           --allow-dirty --locked --no-verify
 
       # --all-targets only builds examples, so an example can carry a wrong
