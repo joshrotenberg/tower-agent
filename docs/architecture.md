@@ -82,12 +82,19 @@ of whether its output is usable.
 
 Neither ceiling bounds peak memory inside the provider wrappers, which read
 child output to completion before the adapter sees it. That bound belongs
-upstream, and `ClaudeService::with_output_limit` now exposes it: the wrapper
-stops the child the way cancellation does and reports a typed failure
-carrying no captured content, which this adapter maps to `Limit` in the
-running phase with possible effects, because the turn was interrupted rather
-than completed. It is off unless a host sets it. Codex has no equivalent
-control yet, so a Codex turn's capture remains unbounded.
+upstream, and both services now expose it: `ClaudeService::with_output_limit`
+and `CodexService::with_output_limit`. Each wrapper stops the child the way
+cancellation does and reports a typed failure carrying no captured content,
+which the adapters map to `Limit` in the running phase with possible effects,
+because the turn was interrupted rather than completed. Both are off unless a
+host sets one.
+
+The two `Limit` failures are deliberately not interchangeable.
+`LimitOutputLayer` reports settlement phase with reported effects: the turn
+ran to completion and only its result was too large. A capture ceiling reports
+running phase with possible effects: the turn was stopped partway and may
+already have acted. A caller deciding whether a retry is safe depends on that
+difference.
 
 Receipts record operation identity and typed terminal state. Observation sits
 outside panic normalization so a panic converted into `AgentError` is visible

@@ -235,9 +235,9 @@ dependencies = [
 
 [[package]]
 name = "codex-wrapper"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70373b31212d1cda03b0de2018465b77b2950932722f2e8a3c0f4fc92dd3d914"
+checksum = "f1b417d981bac138553a1e950672323dfc2f66d618b3817a9c3033d55dfbb779"
 dependencies = [
  "libc",
  "serde",
