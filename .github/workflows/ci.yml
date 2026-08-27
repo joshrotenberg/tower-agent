@@ -41,8 +41,21 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+      # The all-features build cannot reach the provider-feature combinations
+      # a consumer may select, including the default build with none of them.
+      - name: Check the feature matrix
+        run: |
+          cargo clippy -p tower-agent-plan --all-targets --locked -- -D warnings
+          cargo clippy -p tower-agent-plan --all-targets --locked --features claude -- -D warnings
+          cargo clippy -p tower-agent-plan --all-targets --locked --features codex -- -D warnings
+
       - name: Run tests
         run: cargo test --workspace --all-targets --all-features --locked
+
+      # --all-targets excludes doctests, so the examples in the public API
+      # need their own step.
+      - name: Run doctests
+        run: cargo test --workspace --doc --all-features --locked
 
       - name: Build documentation
         env:
