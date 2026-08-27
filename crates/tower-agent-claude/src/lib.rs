@@ -21,6 +21,37 @@
 //! remote turn cannot weaken. These are provider context controls rather than
 //! OS isolation; child environment and filesystem visibility remain separate.
 
+//! # Example
+//!
+//! ```
+//! use tower::ServiceBuilder;
+//! use tower_agent::layer::{DeadlineLayer, SuperviseLayer};
+//! use tower_agent::Turn;
+//! use tower_agent_claude::{ClaudeAmbientContext, ClaudeOptions, ClaudeService};
+//!
+//! // Host policy lives on the service; a turn may strengthen it, never weaken it.
+//! let service = ClaudeService::new()
+//!     .with_ambient_context_policy(ClaudeAmbientContext::Safe);
+//!
+//! let turn = Turn::new("summarize the current diff").with_options(ClaudeOptions {
+//!     json_schema: Some(serde_json::json!({
+//!         "type": "object",
+//!         "properties": { "summary": { "type": "string" } },
+//!         "required": ["summary"],
+//!     })),
+//!     ..ClaudeOptions::default()
+//! });
+//!
+//! // Refusals are available without launching anything.
+//! service.preflight(&turn).expect("the schema and options are supported");
+//!
+//! let stack = ServiceBuilder::new()
+//!     .layer(SuperviseLayer::new())
+//!     .layer(DeadlineLayer::new())
+//!     .service(service);
+//! # let _ = (stack, turn);
+//! ```
+
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};

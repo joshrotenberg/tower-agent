@@ -79,7 +79,8 @@ Supervise
       Admission
         Deadline
           ValidateTurn
-            Provider
+            Authority (providers carrying a filesystem-authority request)
+              Provider
 ```
 
 The order encodes policy:
@@ -90,6 +91,8 @@ The order encodes policy:
 4. `Admission` holds capacity until every inner cleanup path settles.
 5. `Deadline` signals cancellation and drains the provider future.
 6. `ValidateTurn` rejects invalid bodies before launch.
+7. `Authority` rejects excessive filesystem authority closest to the provider,
+   where the host ceiling is known.
 
 `AdmissionLayer` is immediate load shedding, not waiting backpressure. Its
 `poll_ready` reports ready; unavailable capacity becomes typed `Busy` from
@@ -259,9 +262,7 @@ diagnostics are discarded by default; any future diagnostic observer must be
 an explicit host-private, sensitive-data policy rather than part of the
 portable error surface.
 
-## Middleware opportunities
-
-### Filesystem authority
+## Filesystem authority
 
 `FilesystemAuthority` represents read-only, workspace-write, and full-access
 requests without leaking provider wrapper flags into portable request DTOs.
@@ -282,6 +283,12 @@ must not be presented as enforcement of the portable filesystem contract.
 Network, tool, subprocess, and interactive approval policy should be added only
 when concrete provider mechanisms can enforce their semantics.
 
+## Middleware opportunities
+
+The sections above describe shipped behavior. The sections below are open
+seams, except where a subsection states that a provider adapter already
+implements the contract.
+
 ### Context assembly
 
 Build prompt context deterministically from named sources. Record source ids,
@@ -300,6 +307,11 @@ failed provider call may still report spend and token use.
 Validate structured provider output before it becomes a successful outcome.
 Distinguish provider execution failure from settlement failure and retain the
 raw provider evidence only behind a host-private diagnostic boundary.
+
+Both provider adapters already implement part of this contract. Claude
+validates a requested JSON schema as draft-07 before launch, returns the
+validated payload as `TurnOutcome::structured` separate from the prose, and
+fails settlement when a schema was requested and no payload arrived.
 
 The Codex adapter requires exactly one terminal event and requires it to be the
 last parsed event. Only `turn.completed` produces `TurnOutcome`; `turn.failed`
