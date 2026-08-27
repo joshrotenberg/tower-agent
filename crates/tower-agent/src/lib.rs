@@ -78,7 +78,7 @@ mod session;
 
 pub use authority::{AuthorityPolicy, FilesystemAuthority, RequestsFilesystemAuthority};
 pub use environment::{ChildEnvironmentError, ChildEnvironmentPolicy, ResolvedChildEnvironment};
-pub use error::{AgentError, EffectState, ErrorKind, FailurePhase};
+pub use error::{AgentError, EffectState, ErrorKind, FailurePhase, MAX_RETRY_AFTER};
 pub use event::{
     AgentEvent, BoundedEventReceiver, EventLimits, EventObserver, EventSendError, EventSink,
 };

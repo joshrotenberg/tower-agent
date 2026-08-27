@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::Duration;
 
 use crate::FailureEvidence;
 
@@ -9,7 +10,13 @@ pub enum ErrorKind {
     Authentication,
     Unauthorized,
     Unsupported,
+    /// This host has no capacity right now. The provider was never asked.
     Busy,
+    /// The provider or something it depends on is not serving. Distinct from
+    /// [`ErrorKind::Busy`], which is this host's own capacity, and from
+    /// [`ErrorKind::Limit`], which is a quota that a caller has spent.
+    /// Retrying elsewhere may succeed where retrying here will not.
+    Unavailable,
     DeadlineExceeded,
     Cancelled,
     Budget,
@@ -26,6 +33,7 @@ impl fmt::Display for ErrorKind {
             Self::Unauthorized => "unauthorized",
             Self::Unsupported => "unsupported",
             Self::Busy => "busy",
+            Self::Unavailable => "unavailable",
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::Cancelled => "cancelled",
             Self::Budget => "budget",
@@ -84,6 +92,14 @@ impl EffectState {
     }
 }
 
+/// The longest retry delay this crate will carry.
+///
+/// A provider or limiter can report an absurd or hostile value, and a host
+/// that sleeps on it without question stalls a worker indefinitely. Guidance
+/// above this is clamped rather than dropped: the fact that waiting was
+/// advised survives, the unbounded duration does not.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
+
 /// A failure whose category and execution evidence survive middleware.
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
 #[error("{kind}: {message}")]
@@ -93,6 +109,15 @@ pub struct AgentError {
     pub phase: FailurePhase,
     pub effects: EffectState,
     pub evidence: Option<Box<FailureEvidence>>,
+    /// How long a limiter or provider asked the caller to wait.
+    ///
+    /// This is timing, never permission. Whether an operation may be tried
+    /// again at all is decided by [`AgentError::effects`]: guidance to wait
+    /// thirty seconds says nothing about whether the first attempt already
+    /// spent money or wrote files. A caller must satisfy both.
+    ///
+    /// Absent means nobody said, and is never guessed.
+    pub retry_after: Option<Duration>,
     #[source]
     pub cause: Option<Box<AgentError>>,
 }
@@ -110,6 +135,7 @@ impl AgentError {
             phase,
             effects,
             evidence: None,
+            retry_after: None,
             cause: None,
         }
     }
@@ -121,6 +147,29 @@ impl AgentError {
             FailurePhase::Validation,
             EffectState::None,
         )
+    }
+
+    /// The provider or a dependency is not serving.
+    ///
+    /// Nothing was launched, so this carries no effects and is safe to retry
+    /// once whatever is down recovers.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            ErrorKind::Unavailable,
+            message,
+            FailurePhase::Admission,
+            EffectState::None,
+        )
+    }
+
+    /// Record how long a limiter or provider asked the caller to wait.
+    ///
+    /// Clamped to [`MAX_RETRY_AFTER`]. This never makes an operation safe to
+    /// retry; see [`AgentError::retry_after`].
+    #[must_use]
+    pub fn with_retry_after(mut self, after: Duration) -> Self {
+        self.retry_after = Some(after.min(MAX_RETRY_AFTER));
+        self
     }
 
     pub fn busy() -> Self {
@@ -161,6 +210,11 @@ impl AgentError {
 
     pub fn with_cause(mut self, cause: AgentError) -> Self {
         self.effects = self.effects.combine(cause.effects);
+        // Guidance from the settled call is better than none from an outer
+        // wrapper, but an outer layer that has its own stays authoritative.
+        if self.retry_after.is_none() {
+            self.retry_after = cause.retry_after;
+        }
         if let Some(cause_evidence) = cause.evidence.as_deref() {
             match self.evidence.as_deref_mut() {
                 Some(evidence) => evidence.merge_missing(cause_evidence),
@@ -174,5 +228,72 @@ impl AgentError {
     pub fn with_evidence(mut self, evidence: FailureEvidence) -> Self {
         self.evidence = Some(Box::new(evidence));
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_capacity_and_provider_outage_are_distinguishable() {
+        // The distinction the vocabulary exists for: both refuse before
+        // launch with no effects, but one says "not here, now" and the other
+        // says "not this provider". A caller with a second provider should
+        // act differently on each.
+        let busy = AgentError::busy();
+        let down = AgentError::unavailable("circuit is open");
+
+        assert_ne!(busy.kind, down.kind);
+        assert_eq!(busy.phase, down.phase);
+        assert_eq!(busy.effects, EffectState::None);
+        assert_eq!(down.effects, EffectState::None);
+    }
+
+    #[test]
+    fn retry_guidance_is_absent_until_someone_supplies_it() {
+        assert_eq!(AgentError::busy().retry_after, None);
+    }
+
+    #[test]
+    fn retry_guidance_is_clamped_rather_than_believed() {
+        let hostile = AgentError::busy().with_retry_after(Duration::from_secs(86_400));
+        assert_eq!(hostile.retry_after, Some(MAX_RETRY_AFTER));
+
+        let ordinary = AgentError::busy().with_retry_after(Duration::from_secs(30));
+        assert_eq!(ordinary.retry_after, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn guidance_says_nothing_about_whether_a_retry_is_safe() {
+        // Timing and permission are independent. A provider can ask a caller
+        // to come back in a minute after a turn that already spent money and
+        // wrote files, and honoring the delay must not be read as consent to
+        // replay the work.
+        let effectful = AgentError::new(
+            ErrorKind::Limit,
+            "quota exhausted mid-turn",
+            FailurePhase::Running,
+            EffectState::Reported,
+        )
+        .with_retry_after(Duration::from_secs(60));
+
+        assert_eq!(effectful.retry_after, Some(Duration::from_secs(60)));
+        assert_eq!(effectful.effects, EffectState::Reported);
+    }
+
+    #[test]
+    fn an_outer_error_adopts_guidance_from_its_cause() {
+        let outer = AgentError::deadline_exceeded(EffectState::Possible)
+            .with_cause(AgentError::busy().with_retry_after(Duration::from_secs(5)));
+        assert_eq!(outer.retry_after, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn an_outer_error_keeps_its_own_guidance_over_a_cause() {
+        let outer = AgentError::busy()
+            .with_retry_after(Duration::from_secs(2))
+            .with_cause(AgentError::busy().with_retry_after(Duration::from_secs(90)));
+        assert_eq!(outer.retry_after, Some(Duration::from_secs(2)));
     }
 }

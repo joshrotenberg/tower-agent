@@ -4,6 +4,8 @@
   lifecycle, and middleware opportunities.
 - [`plan.md`](plan.md): planning-crate decision record, precedence and merge
   laws, and the retargeting away from argv compilation.
+- [`resilience.md`](resilience.md): which resilience policies are safe over an
+  agent turn, what each requires first, and the recommended layer order.
 - [`../README.md`](../README.md): workspace overview and usage.
 - [`../CONTRIBUTING.md`](../CONTRIBUTING.md): local checks and change discipline.
 - Rustdoc and tests under `crates/tower-agent`: executable API contract.

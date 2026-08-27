@@ -103,7 +103,9 @@ authority.
 The next useful middleware seams are deterministic context assembly, budget
 reservation and reconciliation, output-contract validation, event redaction
 and fanout, and circuit breaking. Retry, fallback, buffering, caching, and
-coalescing require stronger effect guarantees before they are safe.
+coalescing require stronger effect guarantees before they are safe;
+[docs/resilience.md](docs/resilience.md) sets out what each policy needs
+first and why `AgentRequest` is deliberately not `Clone`.
 
 ## Provider services
 
