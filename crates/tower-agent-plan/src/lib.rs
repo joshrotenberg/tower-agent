@@ -10,6 +10,7 @@
 //!     -> resolve
 //! Complete | Missing(requirements) | Invalid(diagnostics)
 //!     -> provider planner fold
+//!     -> adapter preflight (optional, per configured service)
 //! ReadyTurn (a provider-committed Turn<O>)
 //!     -> RoutedTurnService
 //! tower-agent middleware and the provider service
@@ -28,6 +29,9 @@
 //!
 //! - `claude`: the Claude planner and [`PartialClaudeOptions`].
 //! - `codex`: the Codex planner and [`PartialCodexOptions`].
+//!
+//! [`RoutedTurnService`] and [`ReadyTurn`]'s variants require at least one of
+//! them: with no provider feature there is no provider to route to.
 //!
 //! With no provider features enabled the crate still resolves, and
 //! [`compile`] refuses every provider with an `unsupported-provider`

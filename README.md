@@ -30,14 +30,11 @@ One finite turn is the initial operation:
 use tower::ServiceExt;
 use tower_agent::{AgentRequest, EchoService, Turn};
 
-# async fn example() -> Result<(), tower_agent::AgentError> {
 let outcome = EchoService
     .oneshot(AgentRequest::new(Turn::new("inspect this repository")))
     .await?;
 
 assert_eq!(outcome.output, "inspect this repository");
-# Ok(())
-# }
 ```
 
 `AgentRequest<T>` separates the operation body from local call state such as
@@ -71,6 +68,7 @@ ordinary request/response RPCs:
 | `ObserveLayer` | Records typed terminal receipts with stable operation identity. |
 | `SuperviseLayer` | Keeps polling an owned call after its interface caller disappears. |
 | `CatchPanicLayer` | Converts provider call panics into typed terminal failure. |
+| `AuthorityLayer` | Rejects a turn requesting more filesystem authority than the host ceiling allows. |
 
 A representative outside-to-inside stack is:
 
@@ -95,6 +93,12 @@ let service = ServiceBuilder::new()
 Ordering is semantic. Supervision owns the call after caller drop. Panic
 normalization sits inside observation so receipts see typed terminal failure.
 Admission wraps deadline handling so capacity stays occupied through cleanup.
+
+`AuthorityLayer` is host policy rather than call lifetime, so it goes inside
+`ValidateTurn`, closest to the provider, and only for providers whose options
+carry a portable filesystem-authority request. The Codex service repeats the
+check at its own launch boundary, so omitting the layer cannot broaden
+authority.
 
 The next useful middleware seams are deterministic context assembly, budget
 reservation and reconciliation, output-contract validation, event redaction
@@ -157,9 +161,14 @@ Run the complete check suite with:
 just check
 ```
 
+Each crate has its own README stating what that crate is responsible for.
 The [architecture notes](docs/architecture.md) describe the service laws,
-layer ordering, process lifecycle, and middleware roadmap. See
+layer ordering, process lifecycle, and middleware roadmap, and
+[docs/plan.md](docs/plan.md) records the planning decisions. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for local checks and change discipline.
+
+The examples above are kept honest by the crate-level rustdoc, which compiles
+equivalent code as doctests on every run.
 
 ## License
 

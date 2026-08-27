@@ -4,6 +4,65 @@
 //! middleware vocabulary. It does not contain an MCP server, transport, task
 //! store, scheduler, or provider implementation. Applications may project the
 //! services onto MCP, a CLI, HTTP, or call them directly.
+//!
+//! # One finite turn
+//!
+//! ```
+//! use tower::ServiceExt;
+//! use tower_agent::{AgentRequest, EchoService, Turn};
+//!
+//! # async fn example() -> Result<(), tower_agent::AgentError> {
+//! let outcome = EchoService
+//!     .oneshot(AgentRequest::new(Turn::new("inspect this repository")))
+//!     .await?;
+//!
+//! assert_eq!(outcome.output, "inspect this repository");
+//! // Evidence a provider did not supply stays absent rather than zero.
+//! assert_eq!(outcome.cost, None);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Composing execution policy
+//!
+//! Ordering is semantic: supervision owns the call after the caller drops it,
+//! panic normalization sits inside observation so receipts see a typed
+//! terminal failure, and admission wraps deadline handling so capacity stays
+//! occupied through cleanup.
+//!
+//! ```
+//! use tower::ServiceBuilder;
+//! use tower_agent::EchoService;
+//! use tower_agent::layer::{
+//!     AdmissionLayer, CatchPanicLayer, DeadlineLayer, ObserveLayer, ReceiptObserver,
+//!     SuperviseLayer, ValidateTurnLayer,
+//! };
+//!
+//! let service = ServiceBuilder::new()
+//!     .layer(SuperviseLayer::new())
+//!     .layer(ObserveLayer::new(ReceiptObserver::default()))
+//!     .layer(CatchPanicLayer::new())
+//!     .layer(AdmissionLayer::single_flight())
+//!     .layer(DeadlineLayer::new())
+//!     .layer(ValidateTurnLayer::new())
+//!     .service(EchoService);
+//! # let _ = service;
+//! ```
+//!
+//! # Reading a failure
+//!
+//! A failure carries four independent dimensions, so a caller can decide what
+//! is safe to do next rather than guessing from a message.
+//!
+//! ```
+//! use tower_agent::{AgentError, EffectState, ErrorKind, FailurePhase};
+//!
+//! let error = AgentError::busy();
+//! assert_eq!(error.kind, ErrorKind::Busy);
+//! // Nothing was launched, so a caller may retry this one safely.
+//! assert_eq!(error.phase, FailurePhase::Admission);
+//! assert_eq!(error.effects, EffectState::None);
+//! ```
 
 mod authority;
 mod environment;

@@ -27,6 +27,28 @@
 //! skill-disable setting. Unlisted discovered skills can therefore remain.
 //! Ephemeral turns are a separate per-turn persistence choice.
 
+//! # Example
+//!
+//! ```
+//! use tower_agent::{AuthorityPolicy, FilesystemAuthority, Turn};
+//! use tower_agent_codex::{CodexAmbientContextPolicy, CodexOptions, CodexService};
+//!
+//! // Read-only is the default ceiling; workspace write is an explicit host choice.
+//! let service = CodexService::new()
+//!     .with_authority_policy(AuthorityPolicy::read_only())
+//!     .with_ambient_context_policy(CodexAmbientContextPolicy::Automation);
+//!
+//! let allowed = Turn::new("inspect this repository").with_options(CodexOptions::default());
+//! service.preflight(&allowed).expect("read-only is within the ceiling");
+//!
+//! let excessive = Turn::new("rewrite the repository").with_options(CodexOptions {
+//!     filesystem_authority: FilesystemAuthority::WorkspaceWrite,
+//!     ..CodexOptions::default()
+//! });
+//! // Refused before any process exists, and refused again at launch.
+//! assert!(service.preflight(&excessive).is_err());
+//! ```
+
 use std::fmt;
 use std::future::Future;
 use std::io::Write;
