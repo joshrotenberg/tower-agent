@@ -68,7 +68,13 @@ use tower_agent::{
     SpawnReceipt, TokenUsage, Turn, TurnOutcome,
 };
 
+/// The provider tag carried by session handles and matched on resume.
 const PROVIDER: &str = "codex";
+
+/// How this provider is named in caller-facing error text. Distinct from
+/// [`PROVIDER`], which is a machine-matched tag: changing the tag would
+/// break resume, changing this only changes prose.
+const PROVIDER_DISPLAY: &str = "Codex";
 
 /// Maximum serialized size accepted for a Codex output schema.
 pub const MAX_OUTPUT_SCHEMA_BYTES: usize = 1024 * 1024;
@@ -447,7 +453,7 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
         Box::pin(async move {
             let (turn, cancellation) = prepared?;
             if cancellation.is_cancelled() {
-                return Err(cancelled_before_launch());
+                return Err(AgentError::cancelled_before_launch(PROVIDER_DISPLAY));
             }
 
             let skill_config = render_skill_config(&service.skill_policy)?;
@@ -455,7 +461,7 @@ impl Service<AgentRequest<Turn<CodexOptions>>> for CodexService {
             let codex = service.build_codex(turn.working_directory.as_deref(), operation_id)?;
 
             if cancellation.is_cancelled() {
-                return Err(cancelled_before_launch());
+                return Err(AgentError::cancelled_before_launch(PROVIDER_DISPLAY));
             }
 
             let output_schema_file = turn
@@ -536,7 +542,7 @@ fn prepare(
 ) -> Result<(PreparedTurn, CancellationToken), AgentError> {
     let cancellation = request.context.cancellation().clone();
     if cancellation.is_cancelled() {
-        return Err(cancelled_before_launch());
+        return Err(AgentError::cancelled_before_launch(PROVIDER_DISPLAY));
     }
 
     let turn = request.body;
@@ -1025,30 +1031,6 @@ fn map_usage(usage: codex_wrapper::TokenUsage) -> TokenUsage {
     }
 }
 
-/// Keep unclassified failures useful without forwarding provider output,
-/// command arguments, paths, prompts, or credentials across the adapter.
-fn command_failed_message(provider: &str, exit_code: i32) -> String {
-    format!("{provider} command failed with exit code {exit_code}")
-}
-
-fn cancelled_before_launch() -> AgentError {
-    AgentError::new(
-        ErrorKind::Cancelled,
-        "Codex turn was cancelled before launch",
-        FailurePhase::Admission,
-        EffectState::None,
-    )
-}
-
-fn cancelled_in_flight() -> AgentError {
-    AgentError::new(
-        ErrorKind::Cancelled,
-        "Codex turn was cancelled",
-        FailurePhase::Running,
-        EffectState::Possible,
-    )
-}
-
 fn map_launch_error(error: codex_wrapper::Error) -> AgentError {
     let message = match error {
         codex_wrapper::Error::NotFound => "Codex executable was not found".to_string(),
@@ -1131,7 +1113,7 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
             FailurePhase::Running,
             EffectState::Possible,
         ),
-        codex_wrapper::Error::Cancelled { .. } => cancelled_in_flight(),
+        codex_wrapper::Error::Cancelled { .. } => AgentError::cancelled_in_flight(PROVIDER_DISPLAY),
         codex_wrapper::Error::Auth { .. } => AgentError::new(
             ErrorKind::Authentication,
             "Codex credentials were rejected",
@@ -1169,12 +1151,7 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
             if let Some(classified) = terminal_failure_from_stream(&stdout) {
                 classified
             } else {
-                AgentError::new(
-                    ErrorKind::Provider,
-                    command_failed_message("Codex", exit_code),
-                    FailurePhase::Running,
-                    EffectState::Possible,
-                )
+                AgentError::command_failed(PROVIDER_DISPLAY, exit_code)
             }
         }
         codex_wrapper::Error::Json { .. } => AgentError::new(
