@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .wait_duration_in_open(Duration::from_millis(50))
         .permitted_calls_in_half_open(1)
         .failure_classifier(classify_provider_health)
-        .build_with_handle();
+        .build_with_handle()?;
 
     // Keep Supervise outside the breaker. If the caller drops its future,
     // Supervise retains the breaker and provider call through settlement, so
@@ -74,7 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .oneshot(request("healthy call", None))
         .await
         .expect_err("open circuit rejects the call");
-    assert_eq!(rejected.kind, ErrorKind::Busy);
+    // Unavailable, matching `map_breaker_error`: an open circuit is the
+    // provider being down, not this host being full.
+    assert_eq!(rejected.kind, ErrorKind::Unavailable);
     assert_eq!(rejected.phase, FailurePhase::Admission);
     assert_eq!(rejected.effects, EffectState::None);
     println!("open-circuit rejection: {rejected}");

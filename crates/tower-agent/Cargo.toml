@@ -30,4 +30,9 @@ tokio = { workspace = true, features = [
     "test-util",
 ] }
 tower-mcp = { workspace = true, features = ["testing"] }
-tower-resilience = { version = "0.12.0", features = ["bulkhead", "circuitbreaker", "ratelimiter"] }
+tower-resilience = { version = "0.13.0", features = [
+    "bulkhead",
+    "circuitbreaker",
+    "health-circuitbreaker",
+    "ratelimiter",
+] }

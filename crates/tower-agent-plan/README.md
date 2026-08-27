@@ -33,6 +33,18 @@ cancellation, and settlement belong to the provider adapters and the kernel
 middleware. The decision record, including what was deliberately cut from
 the originating design, is [`docs/plan.md`](../../docs/plan.md).
 
+## Example
+
+[`examples/elicitation_loop.rs`](examples/elicitation_loop.rs) runs the whole
+shape in one file: layered defaults, a fragment a user supplied, requirements
+reported as data rather than prompted for, answers folded back in, and a typed
+`Turn<ClaudeOptions>` at the end. It also shows a refusal, because diagnostics
+are data on the same footing as requirements.
+
+```sh
+cargo run -p tower-agent-plan --features claude --example elicitation_loop
+```
+
 ## Status
 
 Unpublished workspace crate. The vocabulary and merge laws are specified by
