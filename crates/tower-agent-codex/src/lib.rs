@@ -812,6 +812,22 @@ fn settle_outcome(
             outcome.duration = Some(duration);
             Ok(outcome)
         }
+        // A request the API refused never began generating, so it is not an
+        // uncertain turn: it carries no effects and no continuation. Saying
+        // otherwise would make a durable host record a resumable turn for a
+        // call that did nothing, and forbid the retry that fixing the request
+        // makes safe.
+        TerminalState::Failed(TurnFailureKind::ApiRequestRejected) => Err(AgentError::new(
+            ErrorKind::InvalidRequest,
+            "Codex rejected the request before generating output",
+            FailurePhase::Validation,
+            EffectState::None,
+        )
+        .with_evidence(FailureEvidence {
+            usage,
+            duration: Some(duration),
+            ..FailureEvidence::default()
+        })),
         TerminalState::Failed(failure) => {
             let (kind, message) = match failure {
                 TurnFailureKind::RolloutBudgetExhausted => (
@@ -964,6 +980,32 @@ fn map_launch_error(error: codex_wrapper::Error) -> AgentError {
     )
 }
 
+/// A request the upstream API refused before generating anything.
+///
+/// Generation never began, so the turn had no effects and left nothing to
+/// continue. Reporting it as a running, possibly-effectful failure would make
+/// a durable host record a resumable turn for a call that did nothing, and
+/// would forbid the retry that correcting the request makes safe.
+fn rejected_request_error() -> AgentError {
+    AgentError::new(
+        ErrorKind::InvalidRequest,
+        "Codex rejected the request before generating output",
+        FailurePhase::Validation,
+        EffectState::None,
+    )
+}
+
+/// Whether a captured event stream ends in an API request rejection.
+///
+/// Used only for classification. No diagnostic text from the stream reaches
+/// the returned error.
+fn stream_reports_a_rejected_request(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<codex_wrapper::JsonLineEvent>(line).ok())
+        .any(|event| event.turn_failure_kind() == Some(TurnFailureKind::ApiRequestRejected))
+}
+
 fn map_run_error(error: codex_wrapper::Error) -> AgentError {
     match error {
         codex_wrapper::Error::NotFound => AgentError::new(
@@ -1022,12 +1064,24 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
             FailurePhase::Validation,
             EffectState::None,
         ),
-        codex_wrapper::Error::CommandFailed { exit_code, .. } => AgentError::new(
-            ErrorKind::Provider,
-            command_failed_message("Codex", exit_code),
-            FailurePhase::Running,
-            EffectState::Possible,
-        ),
+        codex_wrapper::Error::CommandFailed {
+            exit_code, stdout, ..
+        } => {
+            // A rejected request is reported on the event stream and then the
+            // CLI exits nonzero, so the terminal event arrives here rather
+            // than through a parsed result. Recover the classification before
+            // falling back to the conservative reading.
+            if stream_reports_a_rejected_request(&stdout) {
+                rejected_request_error()
+            } else {
+                AgentError::new(
+                    ErrorKind::Provider,
+                    command_failed_message("Codex", exit_code),
+                    FailurePhase::Running,
+                    EffectState::Possible,
+                )
+            }
+        }
         codex_wrapper::Error::Json { .. } => AgentError::new(
             ErrorKind::Provider,
             "Codex returned an invalid event stream",
@@ -2475,5 +2529,101 @@ mod preflight_parity_tests {
         let service = CodexService::new().with_binary("/nonexistent/codex-binary");
         let turn = Turn::new("hello").with_options(CodexOptions::default());
         assert!(service.preflight(&turn).is_ok());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod rejected_request_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tower::ServiceExt;
+    use tower_agent::{AgentRequest, EffectState, ErrorKind, FailurePhase, Turn};
+
+    use super::{CodexOptions, CodexService};
+
+    /// The terminal line and exit code captured from a live `codex-cli`
+    /// 0.149.0 run whose output schema omitted a property `type`. Codex emits
+    /// `turn.failed` and then exits 1, so both halves are reproduced.
+    const CAPTURED_REJECTION: &str = concat!(
+        "#!/bin/sh\n",
+        "cat >/dev/null\n",
+        "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"01a040b1-a346-7972-9d80-1fc6083f220c\"}'\n",
+        "printf '%s\\n' '{\"type\":\"turn.started\"}'\n",
+        r#"printf '%s\n' '{"type":"turn.failed","error":{"message":"{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_json_schema\",\n    \"message\": \"Invalid schema for response_format ''codex_output_schema'': In context=(''properties'', ''ok''), schema must have a ''type'' key.\",\n    \"param\": \"text.format.schema\"\n  },\n  \"status\": 400\n}"}}'"#,
+        "\n",
+        // The real CLI exits nonzero after reporting the rejection.
+        "exit 1\n",
+    );
+
+    fn scripted(name: &str, script: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-{}-{}.sh",
+            name,
+            std::process::id()
+        ));
+        std::fs::write(&path, script).expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn an_api_rejected_request_does_not_become_running_and_possible() {
+        let path = scripted("rejected", CAPTURED_REJECTION);
+        let error = CodexService::new()
+            .with_binary(&path)
+            .oneshot(AgentRequest::new(
+                Turn::new("say ok").with_options(CodexOptions::default()),
+            ))
+            .await
+            .expect_err("a rejected request is a failure");
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert_eq!(error.phase, FailurePhase::Validation);
+        // Generation never began, so this is safe to correct and retry.
+        assert_eq!(error.effects, EffectState::None);
+
+        // A thread id was emitted, but the turn cannot be continued, so it
+        // must not poison a managed continuation.
+        let session = error
+            .evidence
+            .as_deref()
+            .and_then(|evidence| evidence.session.clone());
+        assert!(session.is_none(), "rejected requests advertise no session");
+
+        // Provider diagnostics stay out of the public surface.
+        for text in [error.message.clone(), format!("{error:?}")] {
+            assert!(!text.contains("codex_output_schema"), "{text}");
+            assert!(!text.contains("invalid_json_schema"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn other_provider_failures_stay_conservative() {
+        let path = scripted(
+            "generic",
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n",
+                "printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"tool policy rejected\"}}'\n",
+                "exit 1\n",
+            ),
+        );
+        let error = CodexService::new()
+            .with_binary(&path)
+            .oneshot(AgentRequest::new(
+                Turn::new("say ok").with_options(CodexOptions::default()),
+            ))
+            .await
+            .expect_err("a generic turn failure is a failure");
+        let _ = std::fs::remove_file(path);
+
+        // A failure the provider did not classify may have done work.
+        assert_eq!(error.kind, ErrorKind::Provider);
+        assert_eq!(error.phase, FailurePhase::Running);
+        assert_eq!(error.effects, EffectState::Possible);
     }
 }
