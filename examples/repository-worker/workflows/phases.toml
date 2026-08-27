@@ -1,0 +1,39 @@
+# The same fan-out and join, written as phases. Steps within a phase are
+# independent; each phase waits for the one before it. This normalizes to the
+# same definition as dag.toml.
+schema_version = 1
+
+[workflow]
+id = "review-fanout"
+version = "v1"
+
+[[phase]]
+name = "discover"
+
+[[phase.step]]
+id = "branch"
+kind = "mechanical"
+op = "read_branch"
+
+[[phase]]
+name = "review"
+
+[[phase.step]]
+id = "architecture"
+kind = "agent"
+profile = "reviewer"
+prompt = "Review the architecture."
+
+[[phase.step]]
+id = "tests"
+kind = "agent"
+profile = "implementer"
+prompt = "Review the test coverage."
+
+[[phase]]
+name = "join"
+
+[[phase.step]]
+id = "join"
+kind = "mechanical"
+op = "collect"

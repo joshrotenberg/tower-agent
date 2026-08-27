@@ -1,0 +1,31 @@
+# Fan-out and join. Two independent reviews, then one collection.
+schema_version = 1
+
+[workflow]
+id = "review-fanout"
+version = "v1"
+
+[[step]]
+id = "branch"
+kind = "mechanical"
+op = "read_branch"
+
+[[step]]
+id = "architecture"
+needs = ["branch"]
+kind = "agent"
+profile = "reviewer"
+prompt = "Review the architecture."
+
+[[step]]
+id = "tests"
+needs = ["branch"]
+kind = "agent"
+profile = "implementer"
+prompt = "Review the test coverage."
+
+[[step]]
+id = "join"
+needs = ["architecture", "tests"]
+kind = "mechanical"
+op = "collect"

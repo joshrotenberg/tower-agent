@@ -19,6 +19,12 @@ use crate::StepCall;
 /// observers or preassigned sessions can build an `AgentRequest` directly in
 /// their dispatcher instead.
 ///
+/// This is the single-provider convenience. It binds one `Turn<Options>`
+/// type, so a host whose steps choose between providers cannot use it: those
+/// turns have different option types. Such a host writes its own dispatcher
+/// and routes a `tower_agent_plan::ReadyTurn` through
+/// `tower_agent_plan::RoutedTurnService`, which exists for exactly that.
+///
 /// This convenience adapter adds no retry, deadline layer, supervision, or
 /// persistence. In particular, durable job resolution should be modeled as an
 /// asynchronous dispatcher service with its own error type, not hidden in this
