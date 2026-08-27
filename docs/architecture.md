@@ -81,8 +81,13 @@ the accounting the turn established, since the turn ran and spent regardless
 of whether its output is usable.
 
 Neither ceiling bounds peak memory inside the provider wrappers, which read
-child output to EOF before the adapter sees it. That bound has to be added
-upstream.
+child output to completion before the adapter sees it. That bound belongs
+upstream, and `ClaudeService::with_output_limit` now exposes it: the wrapper
+stops the child the way cancellation does and reports a typed failure
+carrying no captured content, which this adapter maps to `Limit` in the
+running phase with possible effects, because the turn was interrupted rather
+than completed. It is off unless a host sets it. Codex has no equivalent
+control yet, so a Codex turn's capture remains unbounded.
 
 Receipts record operation identity and typed terminal state. Observation sits
 outside panic normalization so a panic converted into `AgentError` is visible

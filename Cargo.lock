@@ -219,9 +219,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claude-wrapper"
-version = "0.14.2"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "457e80153f51f714ea71c1630b4907e6c8a27738d7d8bc8fc166f7aebc367e3f"
+checksum = "cae47643cc94f0b0367038d13c358fd0f66adad0bb4e6c699a4ad70eec7c6e37"
 dependencies = [
  "libc",
  "serde",
