@@ -11,6 +11,8 @@
 - [`workflow-host-report.md`](workflow-host-report.md): what the workflow
   library felt like from a real configuration-driven host, and what that
   says about publishing it.
+- [`mcp.md`](mcp.md): decision record for a proposed MCP adapter, the three
+  identities at the session boundary, and what scopes a public continuation id.
 - [`resilience.md`](resilience.md): which resilience policies are safe over an
   agent turn, what each requires first, and the recommended layer order.
 - [`../README.md`](../README.md): workspace overview and usage.
