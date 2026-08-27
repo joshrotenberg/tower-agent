@@ -832,6 +832,62 @@ fn sandbox_config(authority: FilesystemAuthority) -> &'static str {
     }
 }
 
+/// What a terminal `turn.failed` means, decided in exactly one place.
+///
+/// Both settlement paths route through here. Codex reports a failed turn on
+/// the event stream and then exits nonzero, so the same terminal event
+/// reaches the adapter as a parsed result on one path and as a command
+/// failure on the other. Deciding separately in each is how the rollout
+/// budget class came to be reachable only when the CLI happened to exit zero.
+fn classify_terminal_failure(
+    failure: TurnFailureKind,
+    session: Option<SessionHandle>,
+    usage: Option<TokenUsage>,
+    duration: Option<Duration>,
+) -> AgentError {
+    match failure {
+        // A request the API refused never began generating, so it carries no
+        // effects and nothing to continue. Advertising a session here would
+        // make a durable host record a resumable turn for a call that did
+        // nothing.
+        TurnFailureKind::ApiRequestRejected => AgentError::new(
+            ErrorKind::InvalidRequest,
+            "Codex rejected the request before generating output",
+            FailurePhase::Validation,
+            EffectState::None,
+        )
+        .with_evidence(FailureEvidence {
+            usage,
+            duration,
+            ..FailureEvidence::default()
+        }),
+        TurnFailureKind::RolloutBudgetExhausted => AgentError::new(
+            ErrorKind::Budget,
+            "Codex turn exhausted its rollout token budget",
+            FailurePhase::Running,
+            EffectState::Possible,
+        )
+        .with_evidence(FailureEvidence {
+            session,
+            usage,
+            duration,
+            ..FailureEvidence::default()
+        }),
+        _ => AgentError::new(
+            ErrorKind::Provider,
+            "Codex reported a failed turn",
+            FailurePhase::Running,
+            EffectState::Possible,
+        )
+        .with_evidence(FailureEvidence {
+            session,
+            usage,
+            duration,
+            ..FailureEvidence::default()
+        }),
+    }
+}
+
 fn settle_outcome(
     mut result: QueryResult,
     prior_session: Option<String>,
@@ -866,35 +922,12 @@ fn settle_outcome(
         // otherwise would make a durable host record a resumable turn for a
         // call that did nothing, and forbid the retry that fixing the request
         // makes safe.
-        TerminalState::Failed(TurnFailureKind::ApiRequestRejected) => Err(AgentError::new(
-            ErrorKind::InvalidRequest,
-            "Codex rejected the request before generating output",
-            FailurePhase::Validation,
-            EffectState::None,
-        )
-        .with_evidence(FailureEvidence {
+        TerminalState::Failed(failure) => Err(classify_terminal_failure(
+            failure,
+            session,
             usage,
-            duration: Some(duration),
-            ..FailureEvidence::default()
-        })),
-        TerminalState::Failed(failure) => {
-            let (kind, message) = match failure {
-                TurnFailureKind::RolloutBudgetExhausted => (
-                    ErrorKind::Budget,
-                    "Codex turn exhausted its rollout token budget",
-                ),
-                _ => (ErrorKind::Provider, "Codex reported a failed turn"),
-            };
-            Err(
-                AgentError::new(kind, message, FailurePhase::Running, EffectState::Possible)
-                    .with_evidence(FailureEvidence {
-                        session,
-                        usage,
-                        duration: Some(duration),
-                        ..FailureEvidence::default()
-                    }),
-            )
-        }
+            Some(duration),
+        )),
     }
 }
 
@@ -1029,30 +1062,32 @@ fn map_launch_error(error: codex_wrapper::Error) -> AgentError {
     )
 }
 
-/// A request the upstream API refused before generating anything.
+/// Recover a terminal classification from a stream captured on the error
+/// path.
 ///
-/// Generation never began, so the turn had no effects and left nothing to
-/// continue. Reporting it as a running, possibly-effectful failure would make
-/// a durable host record a resumable turn for a call that did nothing, and
-/// would forbid the retry that correcting the request makes safe.
-fn rejected_request_error() -> AgentError {
-    AgentError::new(
-        ErrorKind::InvalidRequest,
-        "Codex rejected the request before generating output",
-        FailurePhase::Validation,
-        EffectState::None,
-    )
-}
-
-/// Whether a captured event stream ends in an API request rejection.
+/// Codex reports a failed turn and then exits nonzero, and a nonzero exit
+/// gives the wrapper a command failure carrying the stream as text rather
+/// than parsed events. Without this the classification above would apply only
+/// to runs that happened to exit zero.
 ///
-/// Used only for classification. No diagnostic text from the stream reaches
-/// the returned error.
-fn stream_reports_a_rejected_request(stdout: &str) -> bool {
-    stdout
+/// No session is advertised from here. This path cannot see whether the turn
+/// was ephemeral and cannot run the handle validation settlement does, and
+/// the crate does not synthesize evidence it has not established. The
+/// classification is what this recovers; accounting stays with the path that
+/// can prove it.
+fn terminal_failure_from_stream(stdout: &str) -> Option<AgentError> {
+    let events: Vec<codex_wrapper::JsonLineEvent> = stdout
         .lines()
-        .filter_map(|line| serde_json::from_str::<codex_wrapper::JsonLineEvent>(line).ok())
-        .any(|event| event.turn_failure_kind() == Some(TurnFailureKind::ApiRequestRejected))
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    match validate_terminal_events(&events).ok()? {
+        TerminalState::Failed(failure) => {
+            Some(classify_terminal_failure(failure, None, None, None))
+        }
+        // A completed turn that still exited nonzero is not a terminal-event
+        // failure, so it keeps the generic command-failure reading.
+        TerminalState::Completed => None,
+    }
 }
 
 fn map_run_error(error: codex_wrapper::Error) -> AgentError {
@@ -1131,8 +1166,8 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
             // CLI exits nonzero, so the terminal event arrives here rather
             // than through a parsed result. Recover the classification before
             // falling back to the conservative reading.
-            if stream_reports_a_rejected_request(&stdout) {
-                rejected_request_error()
+            if let Some(classified) = terminal_failure_from_stream(&stdout) {
+                classified
             } else {
                 AgentError::new(
                     ErrorKind::Provider,
@@ -2768,5 +2803,88 @@ mod output_limit_tests {
         let _ = std::fs::remove_file(path);
 
         assert_ne!(error.kind, ErrorKind::Limit, "no ceiling was configured");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod terminal_classification_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tower::ServiceExt;
+    use tower_agent::{AgentRequest, EffectState, ErrorKind, FailurePhase, Turn};
+
+    use super::{CodexOptions, CodexService};
+
+    /// A CLI that reports one terminal event and then exits with a chosen
+    /// code, so a classification can be checked on both settlement paths.
+    fn terminal_cli(name: &str, event: &str, exit_code: u8) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-terminal-{}-{}.sh",
+            name,
+            std::process::id()
+        ));
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "printf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"t1\"}}'\n",
+                "printf '%s\\n' '{}'\n",
+                "exit {}\n",
+            ),
+            event, exit_code
+        );
+        std::fs::write(&path, script).expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    async fn classify(name: &str, event: &str, exit_code: u8) -> tower_agent::AgentError {
+        let path = terminal_cli(name, event, exit_code);
+        let error = CodexService::new()
+            .with_binary(&path)
+            .oneshot(AgentRequest::new(
+                Turn::new("hello").with_options(CodexOptions::default()),
+            ))
+            .await
+            .expect_err("a failed turn is a failure");
+        let _ = std::fs::remove_file(path);
+        error
+    }
+
+    const BUDGET: &str =
+        r#"{"type":"turn.failed","error":{"message":"shared rollout token budget exhausted"}}"#;
+    const GENERIC: &str = r#"{"type":"turn.failed","error":{"message":"tool policy rejected"}}"#;
+
+    /// The exit code is not part of what a terminal event means. Codex reports
+    /// a failed turn and then exits nonzero, so a classification that only
+    /// worked on the exit-zero path would never fire in production.
+    #[tokio::test]
+    async fn classification_does_not_depend_on_the_exit_code() {
+        for exit_code in [0, 1] {
+            let error = classify("budget", BUDGET, exit_code).await;
+            assert_eq!(error.kind, ErrorKind::Budget, "exit {exit_code}");
+            assert_eq!(error.phase, FailurePhase::Running);
+            assert_eq!(error.effects, EffectState::Possible);
+
+            let error = classify("generic", GENERIC, exit_code).await;
+            assert_eq!(error.kind, ErrorKind::Provider, "exit {exit_code}");
+            assert_eq!(error.effects, EffectState::Possible);
+        }
+    }
+
+    /// A completed turn that still exits nonzero is not a terminal-event
+    /// failure, so it must not be dressed up as one.
+    #[tokio::test]
+    async fn a_completed_turn_exiting_nonzero_keeps_the_command_failure_reading() {
+        let error = classify(
+            "completed",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'\n' '{"type":"turn.completed"}"#,
+            1,
+        )
+        .await;
+        assert_ne!(error.kind, ErrorKind::Budget);
+        assert_ne!(error.kind, ErrorKind::InvalidRequest);
     }
 }
