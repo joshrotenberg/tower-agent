@@ -13,7 +13,7 @@ release = true
 publish = true
 changelog_update = true
 changelog_path = "CHANGELOG.md"
-changelog_include = ["tower-agent-claude", "tower-agent-codex"]
+changelog_include = ["tower-agent-claude", "tower-agent-codex", "tower-agent-workflow"]
 git_release_enable = true
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
@@ -36,7 +36,9 @@ release = false
 
 [[package]]
 name = "tower-agent-workflow"
-release = false
+version_group = "tower-agent"
+release = true
+publish = true
 
 [[package]]
 name = "apalis-local-example"

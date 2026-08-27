@@ -10,7 +10,6 @@ readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 description = "Experimental Tower-native workflows over finite agent and mechanical operations."
-publish = false
 
 [dependencies]
 futures-util.workspace = true

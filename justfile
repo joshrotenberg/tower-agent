@@ -9,7 +9,7 @@ check:
     cargo test --workspace --all-targets --all-features --locked
     cargo test --workspace --doc --all-features --locked
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --locked --no-deps
-    cargo package -p tower-agent -p tower-agent-claude -p tower-agent-codex --allow-dirty --locked --no-verify
+    cargo package -p tower-agent -p tower-agent-claude -p tower-agent-codex -p tower-agent-workflow --allow-dirty --locked --no-verify
     just check-examples
 
 # Execute the library examples. `--all-targets` only builds them, so an
