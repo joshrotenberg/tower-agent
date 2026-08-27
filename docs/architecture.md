@@ -359,6 +359,16 @@ validates a requested JSON schema as draft-07 before launch, returns the
 validated payload as `TurnOutcome::structured` separate from the prose, and
 fails settlement when a schema was requested and no payload arrived.
 
+Codex reports a failed turn on the event stream and then exits nonzero, so the
+same terminal event reaches the adapter two ways: as a parsed result when the
+CLI exits zero, and as a command failure carrying the stream as text when it
+does not. One function decides what a terminal failure means and both paths
+call it, because deciding separately is how the rollout-budget class came to
+be reachable only on the exit-zero path. The recovered path advertises no
+session: it cannot see whether the turn was ephemeral or run the handle
+validation settlement does, and evidence that has not been established is not
+synthesized.
+
 The Codex adapter requires exactly one terminal event and requires it to be the
 last parsed event. Only `turn.completed` produces `TurnOutcome`; `turn.failed`
 becomes an effectful typed failure, including rollout-budget classification and
