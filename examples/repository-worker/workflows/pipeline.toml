@@ -1,0 +1,24 @@
+# A linear pipeline: each step consumes the previous one's result.
+schema_version = 1
+
+[workflow]
+id = "review-pipeline"
+version = "v1"
+
+[[step]]
+id = "branch"
+kind = "mechanical"
+op = "read_branch"
+
+[[step]]
+id = "review"
+needs = ["branch"]
+kind = "agent"
+profile = "reviewer"
+prompt = "Review the branch named by the previous step."
+
+[[step]]
+id = "summarize"
+needs = ["review"]
+kind = "mechanical"
+op = "collect"

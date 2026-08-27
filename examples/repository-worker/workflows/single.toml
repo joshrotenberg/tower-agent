@@ -1,0 +1,12 @@
+# One agent call. The smallest shape the library expresses.
+schema_version = 1
+
+[workflow]
+id = "review-one"
+version = "v1"
+
+[[step]]
+id = "review"
+kind = "agent"
+profile = "reviewer"
+prompt = "Review the current branch and report what changed."

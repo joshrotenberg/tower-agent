@@ -1,0 +1,20 @@
+[package]
+name = "repository-worker-example"
+description = "A repository worker that compiles TOML into tower-agent workflows"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tower-agent.workspace = true
+tower-agent-plan = { workspace = true, features = ["claude", "codex"] }
+tower-agent-workflow.workspace = true
+tower-agent-claude.workspace = true
+tower-agent-codex.workspace = true
+
+serde = { workspace = true }
+toml = "0.9"
+tower.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
