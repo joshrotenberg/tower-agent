@@ -25,7 +25,15 @@ pub enum ReceiptStatus {
         phase: FailurePhase,
         effects: EffectState,
     },
-    Abandoned,
+    /// The call was dropped before it settled.
+    ///
+    /// `effects` distinguishes a future dropped before its first poll, where
+    /// nothing ran, from one dropped after the provider began work. Without
+    /// it a receipt consumer would have to guess, and would be wrong whenever
+    /// it guessed the other way.
+    Abandoned {
+        effects: EffectState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -121,6 +129,10 @@ where
         let mut guard = ReceiptGuard::new(self.observer.clone(), operation_id);
 
         Box::pin(async move {
+            // Reached only once this future is polled, which is also when the
+            // inner call is first polled, so an abandonment recorded after
+            // this point may have produced effects.
+            guard.mark_launched();
             let result = future.await;
             let status = match &result {
                 Ok(_) => ReceiptStatus::Succeeded,
@@ -141,6 +153,7 @@ struct ReceiptGuard {
     operation_id: OperationId,
     started: Instant,
     finished: bool,
+    launched: bool,
 }
 
 impl ReceiptGuard {
@@ -150,7 +163,12 @@ impl ReceiptGuard {
             operation_id,
             started: Instant::now(),
             finished: false,
+            launched: false,
         }
+    }
+
+    fn mark_launched(&mut self) {
+        self.launched = true;
     }
 
     fn finish(&mut self, status: ReceiptStatus) {
@@ -166,10 +184,15 @@ impl ReceiptGuard {
 impl Drop for ReceiptGuard {
     fn drop(&mut self) {
         if !self.finished {
+            let effects = if self.launched {
+                EffectState::Possible
+            } else {
+                EffectState::None
+            };
             let _ = self.observer.try_record(Receipt {
                 operation_id: self.operation_id,
                 elapsed: self.started.elapsed(),
-                status: ReceiptStatus::Abandoned,
+                status: ReceiptStatus::Abandoned { effects },
             });
         }
     }
@@ -250,6 +273,44 @@ mod tests {
 
         let receipt = receipts.recv().await.expect("abandoned receipt");
         assert_eq!(receipt.operation_id, operation_id);
-        assert_eq!(receipt.status, ReceiptStatus::Abandoned);
+        // Never polled, so the provider never ran and no effect is possible.
+        assert_eq!(
+            receipt.status,
+            ReceiptStatus::Abandoned {
+                effects: EffectState::None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_after_the_call_starts_records_possible_effects() {
+        let (observer, mut receipts) = ReceiptObserver::channel(1);
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let provider_entered = entered.clone();
+        let provider = service_fn(move |_request: AgentRequest<Turn>| {
+            let entered = provider_entered.clone();
+            async move {
+                entered.notify_one();
+                std::future::pending::<Result<TurnOutcome, AgentError>>().await
+            }
+        });
+        let mut service = ServiceBuilder::new()
+            .layer(ObserveLayer::new(observer))
+            .service(provider);
+        service.ready().await.expect("service ready");
+
+        let call = tokio::spawn(service.call(AgentRequest::new(Turn::new("hello"))));
+        entered.notified().await;
+        call.abort();
+
+        let receipt = receipts.recv().await.expect("abandoned receipt");
+        // The provider began work before the caller vanished, so a consumer
+        // must not treat this as effect-free.
+        assert_eq!(
+            receipt.status,
+            ReceiptStatus::Abandoned {
+                effects: EffectState::Possible
+            }
+        );
     }
 }

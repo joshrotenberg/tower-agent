@@ -282,15 +282,23 @@ async fn panicking_provider_becomes_typed_internal_failure_and_releases_capacity
         .service(provider);
     let service = tower_agent::BoxTurnService::new(service);
 
+    let operation_id = tower_agent::OperationId::from_u64(4242);
     let error = service
         .clone()
-        .oneshot(AgentRequest::new(Turn::new("panic")))
+        .oneshot(AgentRequest::with_context(
+            Turn::new("panic"),
+            CallContext::new().with_operation_id(operation_id),
+        ))
         .await
         .expect_err("panic is normalized");
     first_started_rx.await.expect("panic call started");
     assert_eq!(error.kind, ErrorKind::Internal);
+    let receipt = receipts.recv().await.expect("panic receipt");
+    // Operation identity must survive panic normalization, not just the
+    // typed status.
+    assert_eq!(receipt.operation_id, operation_id);
     assert_eq!(
-        receipts.recv().await.expect("panic receipt").status,
+        receipt.status,
         ReceiptStatus::Failed {
             kind: ErrorKind::Internal,
             phase: tower_agent::FailurePhase::Settlement,
@@ -378,4 +386,155 @@ async fn deadline_preserves_stronger_settlement_evidence() {
     assert_eq!(cause.kind, ErrorKind::Provider);
     assert_eq!(cause.phase, tower_agent::FailurePhase::Settlement);
     assert_eq!(cause.effects, EffectState::Reported);
+}
+
+/// A provider that completes successfully after observing cancellation, the
+/// case where a turn finishes while racing its own deadline.
+fn late_success_service(
+    outcome: TurnOutcome,
+) -> impl Service<AgentRequest<Turn>, Response = TurnOutcome, Error = AgentError, Future: Send + 'static>
++ Clone {
+    let outcome = Arc::new(outcome);
+    service_fn(move |request: AgentRequest<Turn>| {
+        let outcome = outcome.clone();
+        async move {
+            request.context.cancellation().cancelled().await;
+            Ok::<_, AgentError>((*outcome).clone())
+        }
+    })
+}
+
+fn settled_outcome() -> TurnOutcome {
+    TurnOutcome {
+        session: Some(SessionHandle::new("fake", "resume-me")),
+        usage: Some(tower_agent::TokenUsage {
+            input: Some(41_000),
+            output: Some(2_300),
+            ..tower_agent::TokenUsage::default()
+        }),
+        cost: Some(Cost::usd(0.19)),
+        duration: Some(Duration::from_secs(31)),
+        provider_turns: Some(4),
+        ..TurnOutcome::new("finished just too late")
+    }
+}
+
+#[tokio::test]
+async fn a_deadline_retains_evidence_from_a_successful_late_settlement() {
+    let service = ServiceBuilder::new()
+        .layer(DeadlineLayer::new())
+        .service(late_success_service(settled_outcome()));
+
+    let request = AgentRequest::with_context(
+        Turn::new("late"),
+        CallContext::new().with_deadline(Instant::now() + Duration::from_millis(20)),
+    );
+    let error = service
+        .oneshot(request)
+        .await
+        .expect_err("the deadline elapsed");
+
+    assert_eq!(error.kind, ErrorKind::DeadlineExceeded);
+    // The turn ran to completion, which is stronger than "effects possible".
+    assert_eq!(error.effects, EffectState::Reported);
+
+    let evidence = error.evidence.as_deref().expect("settlement evidence");
+    let expected = settled_outcome();
+    assert_eq!(evidence.session, expected.session);
+    assert_eq!(evidence.usage, expected.usage);
+    assert_eq!(evidence.cost, expected.cost);
+    assert_eq!(evidence.duration, expected.duration);
+    assert_eq!(evidence.provider_turns, expected.provider_turns);
+}
+
+#[tokio::test]
+async fn explicit_cancellation_retains_evidence_from_a_successful_late_settlement() {
+    let cancellation = CancellationToken::new();
+    let entered = Arc::new(Notify::new());
+    let provider_entered = entered.clone();
+    let outcome = settled_outcome();
+    let service = ServiceBuilder::new()
+        .layer(DeadlineLayer::new())
+        .service(service_fn(move |request: AgentRequest<Turn>| {
+            let entered = provider_entered.clone();
+            let outcome = outcome.clone();
+            async move {
+                entered.notify_one();
+                request.context.cancellation().cancelled().await;
+                Ok::<_, AgentError>(outcome)
+            }
+        }));
+
+    let request = AgentRequest::with_context(
+        Turn::new("late"),
+        CallContext::new().with_cancellation(cancellation.clone()),
+    );
+    let call = tokio::spawn(service.oneshot(request));
+    // Cancel only once the provider is genuinely in flight, so this exercises
+    // the drain path rather than the pre-launch rejection.
+    entered.notified().await;
+    cancellation.cancel();
+    let error = call
+        .await
+        .expect("call task")
+        .expect_err("the call was cancelled");
+
+    assert_eq!(error.kind, ErrorKind::Cancelled);
+    assert_eq!(error.effects, EffectState::Reported);
+    assert_eq!(
+        error
+            .evidence
+            .as_deref()
+            .and_then(|evidence| evidence.cost.clone()),
+        Some(Cost::usd(0.19))
+    );
+}
+
+#[tokio::test]
+async fn a_late_settlement_never_overwrites_evidence_the_outer_error_already_carries() {
+    let service = ServiceBuilder::new()
+        .layer(DeadlineLayer::new())
+        .service(late_success_service(settled_outcome()));
+
+    let request = AgentRequest::with_context(
+        Turn::new("late"),
+        CallContext::new().with_deadline(Instant::now() + Duration::from_millis(20)),
+    );
+    let error = service
+        .oneshot(request)
+        .await
+        .expect_err("the deadline elapsed");
+    let evidence = error.evidence.as_deref().expect("settlement evidence");
+
+    // Absent fields are filled from the settlement; nothing is synthesized.
+    assert!(evidence.usage.is_some());
+    assert_eq!(
+        evidence.usage.and_then(tower_agent::TokenUsage::total),
+        Some(43_300)
+    );
+}
+
+#[tokio::test]
+async fn a_request_cancelled_before_launch_is_rejected_at_admission() {
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let service = ServiceBuilder::new()
+        .layer(DeadlineLayer::new())
+        .service(service_fn(|_: AgentRequest<Turn>| async {
+            panic!("the provider must never be called");
+            #[allow(unreachable_code)]
+            Ok::<TurnOutcome, AgentError>(TurnOutcome::new(""))
+        }));
+
+    let request = AgentRequest::with_context(
+        Turn::new("never runs"),
+        CallContext::new().with_cancellation(cancellation),
+    );
+    let error = service.oneshot(request).await.expect_err("pre-cancelled");
+
+    assert_eq!(error.kind, ErrorKind::Cancelled);
+    // Nothing was launched, so the phase matches the elapsed-deadline
+    // rejection rather than claiming the provider was reached.
+    assert_eq!(error.phase, tower_agent::FailurePhase::Admission);
+    assert_eq!(error.effects, EffectState::None);
 }
