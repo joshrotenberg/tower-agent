@@ -172,6 +172,60 @@ impl AgentError {
         self
     }
 
+    /// A turn cancelled before the provider was launched.
+    ///
+    /// Nothing ran, so this carries no effects. Every CLI-backed adapter
+    /// produces this failure, and each producing its own risked them
+    /// drifting apart: the same rejection reported with different phases is
+    /// how a consumer ends up unable to tell a safe retry from an unsafe one.
+    pub fn cancelled_before_launch(provider: &str) -> Self {
+        Self::new(
+            ErrorKind::Cancelled,
+            format!("{provider} turn was cancelled before launch"),
+            FailurePhase::Admission,
+            EffectState::None,
+        )
+    }
+
+    /// A turn cancelled while the provider was running.
+    ///
+    /// The turn may already have acted, so effects stay possible. This is the
+    /// counterpart to [`AgentError::cancelled_before_launch`] and the pair
+    /// only means anything if the distinction is kept.
+    pub fn cancelled_in_flight(provider: &str) -> Self {
+        Self::new(
+            ErrorKind::Cancelled,
+            format!("{provider} turn was cancelled"),
+            FailurePhase::Running,
+            EffectState::Possible,
+        )
+    }
+
+    /// The provider could not be started.
+    ///
+    /// Launch failed, so nothing ran and nothing was spent.
+    pub fn launch_failed(provider: &str) -> Self {
+        Self::new(
+            ErrorKind::Provider,
+            format!("{provider} could not be initialized"),
+            FailurePhase::Launch,
+            EffectState::None,
+        )
+    }
+
+    /// The provider process exited nonzero without a usable terminal result.
+    ///
+    /// It ran, so effects are possible. The exit code is the provider's own
+    /// and carries none of its output.
+    pub fn command_failed(provider: &str, exit_code: i32) -> Self {
+        Self::new(
+            ErrorKind::Provider,
+            format!("{provider} command failed with exit code {exit_code}"),
+            FailurePhase::Running,
+            EffectState::Possible,
+        )
+    }
+
     pub fn busy() -> Self {
         Self::new(
             ErrorKind::Busy,
@@ -234,6 +288,48 @@ impl AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These four exist so every adapter reports the same rejection the same
+    /// way. The classification is the point, not the wording: a consumer
+    /// deciding whether a retry is safe reads phase and effects.
+    #[test]
+    fn the_shared_terminal_failures_classify_consistently() {
+        let before = AgentError::cancelled_before_launch("Claude");
+        assert_eq!(before.phase, FailurePhase::Admission);
+        assert_eq!(before.effects, EffectState::None);
+
+        let in_flight = AgentError::cancelled_in_flight("Codex");
+        assert_eq!(in_flight.phase, FailurePhase::Running);
+        // The turn may already have acted; this is the whole difference from
+        // the pre-launch case.
+        assert_eq!(in_flight.effects, EffectState::Possible);
+        assert_eq!(before.kind, in_flight.kind);
+
+        let launch = AgentError::launch_failed("Codex");
+        assert_eq!(launch.phase, FailurePhase::Launch);
+        assert_eq!(launch.effects, EffectState::None);
+
+        let failed = AgentError::command_failed("Claude", 37);
+        assert_eq!(failed.phase, FailurePhase::Running);
+        assert_eq!(failed.effects, EffectState::Possible);
+        assert!(failed.message.contains("37"));
+    }
+
+    /// The display name is prose. The tag a session carries is not, and the
+    /// two are deliberately separate in the adapters.
+    #[test]
+    fn the_provider_name_reaches_the_message() {
+        assert!(
+            AgentError::cancelled_before_launch("Claude")
+                .message
+                .starts_with("Claude")
+        );
+        assert!(
+            AgentError::cancelled_before_launch("Codex")
+                .message
+                .starts_with("Codex")
+        );
+    }
 
     #[test]
     fn host_capacity_and_provider_outage_are_distinguishable() {

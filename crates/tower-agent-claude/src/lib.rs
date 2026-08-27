@@ -69,7 +69,13 @@ use tower_agent::{
     TokenUsage, Turn, TurnOutcome,
 };
 
+/// The provider tag carried by session handles and matched on resume.
 const PROVIDER: &str = "claude";
+
+/// How this provider is named in caller-facing error text. Distinct from
+/// [`PROVIDER`], which is a machine-matched tag: changing the tag would
+/// break resume, changing this only changes prose.
+const PROVIDER_DISPLAY: &str = "Claude";
 
 /// Maximum serialized size accepted for a Claude JSON schema.
 pub const MAX_JSON_SCHEMA_BYTES: usize = 1024 * 1024;
@@ -423,7 +429,9 @@ impl ClaudeService {
                 ));
             }));
         }
-        builder.build().map_err(|_| launch_error())
+        builder
+            .build()
+            .map_err(|_| AgentError::launch_failed(PROVIDER_DISPLAY))
     }
 }
 
@@ -445,7 +453,7 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
 
     fn call(&mut self, request: AgentRequest<Turn<ClaudeOptions>>) -> Self::Future {
         if request.context.cancellation().is_cancelled() {
-            return Box::pin(async { Err(cancelled_before_launch()) });
+            return Box::pin(async { Err(AgentError::cancelled_before_launch(PROVIDER_DISPLAY)) });
         }
         if let Err(error) = preflight_session(&request.body) {
             return Box::pin(async move { Err(error) });
@@ -748,7 +756,7 @@ async fn run(
 ) -> Result<TurnOutcome, AgentError> {
     if cancellation.is_cancelled() {
         return Err(attach_preassigned_session(
-            cancelled_before_launch(),
+            AgentError::cancelled_before_launch(PROVIDER_DISPLAY),
             preassigned_session.as_ref(),
         ));
     }
@@ -868,19 +876,6 @@ fn query_evidence_without_session(result: &QueryResult) -> FailureEvidence {
     evidence
 }
 
-fn command_failed_message(provider: &str, exit_code: i32) -> String {
-    format!("{provider} command failed with exit code {exit_code}")
-}
-
-fn cancelled_before_launch() -> AgentError {
-    AgentError::new(
-        ErrorKind::Cancelled,
-        "Claude turn was cancelled before launch",
-        FailurePhase::Admission,
-        EffectState::None,
-    )
-}
-
 fn map_query_error(
     result: &QueryResult,
     preassigned_session: Option<&SessionHandle>,
@@ -905,15 +900,6 @@ fn attach_preassigned_session(
             .session = Some(session.clone());
     }
     error
-}
-
-fn launch_error() -> AgentError {
-    AgentError::new(
-        ErrorKind::Provider,
-        "Claude could not be initialized",
-        FailurePhase::Launch,
-        EffectState::None,
-    )
 }
 
 fn map_wrapper_error(error: claude_wrapper::Error) -> AgentError {
@@ -1063,12 +1049,12 @@ fn map_other_wrapper_error(error: claude_wrapper::Error) -> AgentError {
             FailurePhase::Settlement,
             EffectState::Possible,
         ),
-        Error::CommandFailed { exit_code, .. } => (
-            ErrorKind::Provider,
-            command_failed_message("Claude", exit_code),
-            FailurePhase::Running,
-            EffectState::Possible,
-        ),
+        // Returns directly rather than filling the tuple: the shared
+        // constructor already fixes the kind, phase, and effect state, and
+        // restating them here is how they drift.
+        Error::CommandFailed { exit_code, .. } => {
+            return AgentError::command_failed(PROVIDER_DISPLAY, exit_code);
+        }
         Error::OutputLimitExceeded { .. } => (
             ErrorKind::Limit,
             // The stream and the ceiling are host configuration rather than
