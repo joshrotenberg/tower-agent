@@ -1326,6 +1326,7 @@ name = "tower-agent-claude"
 version = "0.1.0"
 dependencies = [
  "claude-wrapper",
+ "jsonschema",
  "serde_json",
  "tokio",
  "tower",

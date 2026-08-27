@@ -114,8 +114,8 @@ fn provider_options_fold_into_claude_fields() {
         Some(ClaudePermissionMode::DontAsk)
     );
     assert_eq!(
-        turn.options.json_schema.as_deref(),
-        Some(r#"{"type":"object"}"#)
+        turn.options.json_schema,
+        Some(serde_json::json!({ "type": "object" }))
     );
     assert!(turn.options.strict_mcp_config);
 }

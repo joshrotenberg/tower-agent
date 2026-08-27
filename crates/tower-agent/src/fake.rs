@@ -83,7 +83,7 @@ impl FakeOptions {
     /// Return an exact successful provider outcome.
     pub fn succeed(outcome: TurnOutcome) -> Self {
         Self {
-            terminal: Some(FakeTerminal::Success(outcome)),
+            terminal: Some(FakeTerminal::Success(Box::new(outcome))),
             ..Self::default()
         }
     }
@@ -104,9 +104,13 @@ impl FakeOptions {
 }
 
 /// Exact terminal behavior for one fake turn.
+///
+/// The success payload is boxed because a `TurnOutcome` carrying structured
+/// output is substantially larger than a failure, and this value is stored in
+/// every configured fake.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FakeTerminal {
-    Success(TurnOutcome),
+    Success(Box<TurnOutcome>),
     Failure(AgentError),
 }
 
@@ -244,6 +248,7 @@ fn call_fake(
         if let Some(terminal) = &request.body.options.terminal {
             return match terminal {
                 FakeTerminal::Success(outcome) => {
+                    let outcome = outcome.as_ref();
                     if !scripted {
                         let _ = request.context.events().try_emit(AgentEvent::OutputDelta {
                             text: outcome.output.clone(),
@@ -433,6 +438,7 @@ mod tests {
             ..TokenUsage::default()
         };
         let expected = TurnOutcome {
+            structured: None,
             output: "structured answer".into(),
             session: Some(SessionHandle::new("fake", "exact-session")),
             usage: Some(usage),
