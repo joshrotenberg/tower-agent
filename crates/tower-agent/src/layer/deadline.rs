@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use tower::{Layer, Service};
 
-use crate::{AgentError, AgentRequest, EffectState};
+use crate::{AgentError, AgentRequest, EffectState, TerminalEvidence};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DeadlineLayer;
@@ -32,7 +32,7 @@ impl<S, T> Service<AgentRequest<T>> for Deadline<S>
 where
     S: Service<AgentRequest<T>, Error = AgentError>,
     S::Future: Send + 'static,
-    S::Response: Send + 'static,
+    S::Response: Send + TerminalEvidence + 'static,
     T: 'static,
 {
     type Response = S::Response;
@@ -49,7 +49,17 @@ where
         let cancellation = request.context.cancellation().clone();
 
         if cancellation.is_cancelled() {
-            return Box::pin(async { Err(AgentError::cancelled(EffectState::None)) });
+            // Nothing is launched on this path, so the phase matches the
+            // elapsed-deadline rejection below rather than claiming the
+            // operation reached the provider.
+            return Box::pin(async {
+                Err(AgentError::new(
+                    crate::ErrorKind::Cancelled,
+                    "agent operation was cancelled before execution",
+                    crate::FailurePhase::Admission,
+                    EffectState::None,
+                ))
+            });
         }
 
         if deadline.is_some_and(|deadline| deadline <= std::time::Instant::now()) {
@@ -105,9 +115,28 @@ where
     }
 }
 
-fn preserve_settlement<T>(mut error: AgentError, settlement: Result<T, AgentError>) -> AgentError {
-    if let Err(cause) = settlement {
-        error = error.with_cause(cause);
+/// Merge whatever the inner call established into the outer failure.
+///
+/// A failed settlement contributes its cause, effect state, and partial
+/// evidence. A successful settlement is stronger still: it proves the turn ran
+/// to completion, so its effects are reported rather than merely possible and
+/// its terminal facts are the accounting a host needs to reconcile a
+/// reservation and offer continuation. Discarding them would report a spend of
+/// nothing for a turn that actually spent.
+fn preserve_settlement<T>(mut error: AgentError, settlement: Result<T, AgentError>) -> AgentError
+where
+    T: TerminalEvidence,
+{
+    match settlement {
+        Err(cause) => error.with_cause(cause),
+        Ok(response) => {
+            error.effects = error.effects.combine(EffectState::Reported);
+            let settled = response.terminal_evidence();
+            match error.evidence.as_deref_mut() {
+                Some(evidence) => evidence.merge_missing(&settled),
+                None => error.evidence = Some(Box::new(settled)),
+            }
+            error
+        }
     }
-    error
 }
