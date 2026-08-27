@@ -182,6 +182,7 @@ pub struct CodexService {
     binary: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     termination_grace: Option<Duration>,
+    output_limit: Option<usize>,
     die_with_parent: bool,
     spawn_observer: Option<SpawnObserver>,
     authority_policy: AuthorityPolicy,
@@ -197,6 +198,7 @@ impl CodexService {
             binary: None,
             codex_home: None,
             termination_grace: None,
+            output_limit: None,
             die_with_parent: false,
             spawn_observer: None,
             authority_policy: AuthorityPolicy::read_only(),
@@ -223,6 +225,28 @@ impl CodexService {
     pub fn with_termination_grace(mut self, duration: Duration) -> Self {
         self.termination_grace = Some(duration);
         self
+    }
+
+    /// Refuse to hold more than this many bytes of the child's captured
+    /// output.
+    ///
+    /// The wrapper reads child stdout and stderr to completion, so without a
+    /// ceiling here peak memory is whatever the provider decides to print,
+    /// and no middleware can bound it: a turn's output is already resident,
+    /// and already parsed, by the time this adapter sees it.
+    /// `LimitOutputLayer` bounds what a caller receives; this bounds what the
+    /// machine holds.
+    ///
+    /// Off by default, matching the wrapper. Exceeding it stops the run the
+    /// way cancellation does and surfaces as a typed `Limit` failure that
+    /// carries no captured content.
+    pub const fn with_output_limit(mut self, max_bytes: usize) -> Self {
+        self.output_limit = Some(max_bytes);
+        self
+    }
+
+    pub const fn output_limit(&self) -> Option<usize> {
+        self.output_limit
     }
 
     /// Ask Linux to kill each Codex child when this worker process dies.
@@ -368,6 +392,9 @@ impl CodexService {
                 )
             })?;
             builder = builder.env("CODEX_HOME", directory);
+        }
+        if let Some(max_bytes) = self.output_limit {
+            builder = builder.output_limit(max_bytes);
         }
         if let Some(duration) = self.termination_grace {
             builder = builder.termination_grace(duration);
@@ -1055,6 +1082,17 @@ fn map_run_error(error: codex_wrapper::Error) -> AgentError {
         codex_wrapper::Error::Timeout { .. } => AgentError::new(
             ErrorKind::DeadlineExceeded,
             "Codex command exceeded its configured timeout",
+            FailurePhase::Running,
+            EffectState::Possible,
+        ),
+        codex_wrapper::Error::OutputLimitExceeded { .. } => AgentError::new(
+            ErrorKind::Limit,
+            // The stream and the ceiling are host configuration rather than
+            // provider content, but the message stays fixed like every other
+            // one here so nothing from the child can leak through it.
+            "Codex output exceeded the host capture limit",
+            // The ceiling trips mid-run and stops the child the way
+            // cancellation does, so the turn may already have acted.
             FailurePhase::Running,
             EffectState::Possible,
         ),
@@ -2647,5 +2685,88 @@ mod rejected_request_tests {
         assert_eq!(error.kind, ErrorKind::Provider);
         assert_eq!(error.phase, FailurePhase::Running);
         assert_eq!(error.effects, EffectState::Possible);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod output_limit_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tower::ServiceExt;
+    use tower_agent::{AgentRequest, EffectState, ErrorKind, FailurePhase, Turn};
+
+    use super::{CodexOptions, CodexService};
+
+    const SENTINEL: &str = "host-private-overflow-marker";
+
+    /// A CLI that floods one unbroken line, so the ceiling cannot quietly
+    /// depend on line breaks to notice.
+    fn flooding_cli(name: &str, stream: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-codex-flood-{}-{}.sh",
+            name,
+            std::process::id()
+        ));
+        let redirect = if stream == "stderr" { " >&2" } else { "" };
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "cat >/dev/null\n",
+                "i=0\n",
+                "while [ $i -lt 200 ]; do\n",
+                "  printf '%s'{} '{}'\n",
+                "  i=$((i+1))\n",
+                "done\n",
+            ),
+            redirect,
+            SENTINEL.repeat(64)
+        );
+        std::fs::write(&path, script).expect("write fake Codex CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn output_past_the_ceiling_is_a_typed_limit_failure() {
+        for stream in ["stdout", "stderr"] {
+            let path = flooding_cli(stream, stream);
+            let error = CodexService::new()
+                .with_binary(&path)
+                .with_output_limit(4096)
+                .oneshot(AgentRequest::new(
+                    Turn::new("hello").with_options(CodexOptions::default()),
+                ))
+                .await
+                .expect_err("the ceiling is exceeded");
+            let _ = std::fs::remove_file(path);
+
+            assert_eq!(error.kind, ErrorKind::Limit, "{stream}");
+            // The child was stopped mid-run, so the turn may already have
+            // acted. This differs from LimitOutputLayer, where the turn
+            // completed and only its output was too large.
+            assert_eq!(error.phase, FailurePhase::Running);
+            assert_eq!(error.effects, EffectState::Possible);
+
+            for text in [error.message.clone(), format!("{error:?}")] {
+                assert!(!text.contains(SENTINEL), "{text}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_ceiling_is_off_until_a_host_sets_one() {
+        let path = flooding_cli("off", "stdout");
+        let error = CodexService::new()
+            .with_binary(&path)
+            .oneshot(AgentRequest::new(
+                Turn::new("hello").with_options(CodexOptions::default()),
+            ))
+            .await
+            .expect_err("the flood is not a coherent event stream");
+        let _ = std::fs::remove_file(path);
+
+        assert_ne!(error.kind, ErrorKind::Limit, "no ceiling was configured");
     }
 }
