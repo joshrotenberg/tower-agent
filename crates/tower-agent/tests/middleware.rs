@@ -388,17 +388,20 @@ async fn deadline_preserves_stronger_settlement_evidence() {
     assert_eq!(cause.effects, EffectState::Reported);
 }
 
-/// A provider that completes successfully after observing cancellation, the
-/// case where a turn finishes while racing its own deadline.
+/// A provider that keeps working past its deadline and then succeeds.
+///
+/// It deliberately outlives the cancellation signal rather than racing it, so
+/// the drain path is exercised deterministically: the deadline or cancellation
+/// arm always wins the select, and the settlement it then awaits is `Ok`.
 fn late_success_service(
     outcome: TurnOutcome,
 ) -> impl Service<AgentRequest<Turn>, Response = TurnOutcome, Error = AgentError, Future: Send + 'static>
 + Clone {
     let outcome = Arc::new(outcome);
-    service_fn(move |request: AgentRequest<Turn>| {
+    service_fn(move |_request: AgentRequest<Turn>| {
         let outcome = outcome.clone();
         async move {
-            request.context.cancellation().cancelled().await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
             Ok::<_, AgentError>((*outcome).clone())
         }
     })
@@ -419,7 +422,7 @@ fn settled_outcome() -> TurnOutcome {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_deadline_retains_evidence_from_a_successful_late_settlement() {
     let service = ServiceBuilder::new()
         .layer(DeadlineLayer::new())
@@ -447,32 +450,21 @@ async fn a_deadline_retains_evidence_from_a_successful_late_settlement() {
     assert_eq!(evidence.provider_turns, expected.provider_turns);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn explicit_cancellation_retains_evidence_from_a_successful_late_settlement() {
     let cancellation = CancellationToken::new();
-    let entered = Arc::new(Notify::new());
-    let provider_entered = entered.clone();
-    let outcome = settled_outcome();
     let service = ServiceBuilder::new()
         .layer(DeadlineLayer::new())
-        .service(service_fn(move |request: AgentRequest<Turn>| {
-            let entered = provider_entered.clone();
-            let outcome = outcome.clone();
-            async move {
-                entered.notify_one();
-                request.context.cancellation().cancelled().await;
-                Ok::<_, AgentError>(outcome)
-            }
-        }));
+        .service(late_success_service(settled_outcome()));
 
     let request = AgentRequest::with_context(
         Turn::new("late"),
         CallContext::new().with_cancellation(cancellation.clone()),
     );
     let call = tokio::spawn(service.oneshot(request));
-    // Cancel only once the provider is genuinely in flight, so this exercises
-    // the drain path rather than the pre-launch rejection.
-    entered.notified().await;
+    // Yield so the call is genuinely in flight, which makes this the drain
+    // path rather than the pre-launch rejection.
+    tokio::task::yield_now().await;
     cancellation.cancel();
     let error = call
         .await
@@ -490,7 +482,7 @@ async fn explicit_cancellation_retains_evidence_from_a_successful_late_settlemen
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_late_settlement_never_overwrites_evidence_the_outer_error_already_carries() {
     let service = ServiceBuilder::new()
         .layer(DeadlineLayer::new())
