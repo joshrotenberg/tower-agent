@@ -42,6 +42,18 @@ An outer deadline or cancellation error keeps the provider settlement as its
 cause and merges missing evidence upward. This lets accounting reconcile a
 reservation and lets a host offer continuation even when the turn hit a cap.
 
+A call may also settle successfully after its deadline elapsed or its
+cancellation fired. That settlement is stronger evidence than a failed one:
+`TerminalEvidence` projects the response into `FailureEvidence`, the outer
+error carries the resulting session, usage, cost, duration, and turn count,
+and its effect state becomes `Reported` because the turn demonstrably ran.
+
+Phase records how far execution actually got, so a rejection before launch is
+never reported as `Running`. A readiness panic and a request cancelled before
+launch are both `Admission`, and a readiness panic carries `EffectState::None`
+because no request was handed to the provider. Overstating either dimension
+forbids recovery that is provably safe.
+
 Missing evidence is `None`. It is never converted to zero. Provider-private
 session values redact themselves in `Debug`, and interfaces expose only their
 own safe projections.
