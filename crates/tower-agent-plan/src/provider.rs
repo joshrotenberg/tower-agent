@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderId {
+    /// Claude Code.
     Claude,
+    /// Codex.
     Codex,
 }
 

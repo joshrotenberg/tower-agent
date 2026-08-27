@@ -49,6 +49,8 @@
 //! assert!(service.preflight(&excessive).is_err());
 //! ```
 
+#![deny(missing_docs)]
+
 use std::fmt;
 use std::future::Future;
 use std::io::Write;
@@ -251,6 +253,9 @@ impl CodexService {
         self
     }
 
+    /// The configured cap on retained provider output, if any.
+    ///
+    /// `None` means unbounded, matching the wrapper default.
     pub const fn output_limit(&self) -> Option<usize> {
         self.output_limit
     }
@@ -265,6 +270,10 @@ impl CodexService {
         self
     }
 
+    /// Whether children are asked to die with this process.
+    ///
+    /// Reports the configured setting, which is not the same as kernel
+    /// support; see [`die_with_parent_supported`](Self::die_with_parent_supported).
     pub const fn die_with_parent(&self) -> bool {
         self.die_with_parent
     }
@@ -290,6 +299,7 @@ impl CodexService {
         self
     }
 
+    /// The host-owned filesystem ceiling applied before launch.
     pub const fn authority_policy(&self) -> &AuthorityPolicy {
         &self.authority_policy
     }
@@ -301,6 +311,7 @@ impl CodexService {
         self
     }
 
+    /// The host-owned policy governing the child environment.
     pub const fn child_environment_policy(&self) -> &ChildEnvironmentPolicy {
         &self.child_environment
     }
@@ -312,6 +323,7 @@ impl CodexService {
         self
     }
 
+    /// The host-owned ambient-context baseline that turn options cannot weaken.
     pub const fn ambient_context_policy(&self) -> CodexAmbientContextPolicy {
         self.ambient_context
     }
@@ -323,10 +335,14 @@ impl CodexService {
         self
     }
 
+    /// The host-owned discovered-skill policy that turn options cannot replace.
     pub const fn skill_policy(&self) -> &CodexSkillPolicy {
         &self.skill_policy
     }
 
+    /// The configured `CODEX_HOME` override, if the host set one.
+    ///
+    /// `None` leaves discovery to the provider.
     pub fn codex_home(&self) -> Option<&Path> {
         self.codex_home.as_deref()
     }

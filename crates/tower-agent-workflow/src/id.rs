@@ -109,4 +109,41 @@ mod tests {
         assert!(StepId::new(" padded").is_err());
         assert!(StepId::new("padded ").is_err());
     }
+
+    #[test]
+    fn every_conversion_agrees_with_the_constructor() {
+        // The conversions are the ergonomic surface a host actually uses, so
+        // none of them may accept a value `new` would reject or alter one it
+        // accepts.
+        let from_new = StepId::new("compile").expect("valid");
+        let from_str = StepId::try_from("compile").expect("valid");
+        let from_string = StepId::try_from(String::from("compile")).expect("valid");
+        assert_eq!(from_new, from_str);
+        assert_eq!(from_new, from_string);
+
+        assert_eq!(from_new.as_str(), "compile");
+        assert_eq!(from_new.as_ref() as &str, "compile");
+        assert_eq!(from_new.to_string(), "compile");
+        assert_eq!(from_new.into_string(), String::from("compile"));
+
+        assert!(StepId::try_from(" compile").is_err());
+        assert!(StepId::try_from(String::from("")).is_err());
+    }
+
+    #[test]
+    fn each_identifier_names_itself_when_it_refuses_a_value() {
+        // A host surfacing this error needs to know which field was wrong.
+        assert_eq!(
+            WorkflowId::new("").expect_err("blank").kind(),
+            "workflow id"
+        );
+        assert_eq!(
+            WorkflowVersion::new("").expect_err("blank").kind(),
+            "workflow version"
+        );
+        assert_eq!(
+            WorkflowRunId::new("").expect_err("blank").kind(),
+            "workflow run id"
+        );
+    }
 }

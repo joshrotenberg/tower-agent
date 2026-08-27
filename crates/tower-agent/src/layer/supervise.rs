@@ -15,6 +15,7 @@ use crate::{AgentError, AgentRequest, EffectState, ErrorKind, FailurePhase};
 pub struct SuperviseLayer;
 
 impl SuperviseLayer {
+    /// Retain dropped calls until they settle.
     pub const fn new() -> Self {
         Self
     }
@@ -29,6 +30,7 @@ impl<S> Layer<S> for SuperviseLayer {
 }
 
 #[derive(Clone, Debug)]
+/// The [`SuperviseLayer`] service. See that type for behavior.
 pub struct Supervise<S> {
     inner: S,
 }

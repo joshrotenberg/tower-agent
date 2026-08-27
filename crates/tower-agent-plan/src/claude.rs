@@ -38,6 +38,7 @@ pub struct PartialClaudeOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Reasoning effort requested for the turn.
     pub effort: Option<EffortChoice>,
     /// Tool allowlist. A bound list replaces lower layers whole.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,11 +47,13 @@ pub struct PartialClaudeOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disallowed_tools: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Ceiling on provider-side turns within this one call.
     pub max_turns: Option<u32>,
     /// CLI-side spend ceiling for the turn, in USD.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_budget_usd: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Permission posture for the turn.
     pub permission_mode: Option<PermissionModeChoice>,
     /// JSON Schema the terminal result must validate against. A bound schema
     /// replaces lower layers whole.
@@ -111,8 +114,11 @@ impl PartialClaudeOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffortChoice {
+    /// Least reasoning effort.
     Low,
+    /// Provider default effort.
     Medium,
+    /// Greatest reasoning effort.
     High,
 }
 
@@ -131,10 +137,15 @@ impl From<EffortChoice> for ClaudeEffort {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionModeChoice {
+    /// The provider's own default posture.
     Default,
+    /// Apply edits without asking.
     AcceptEdits,
+    /// Proceed without prompting.
     DontAsk,
+    /// Plan only, making no changes.
     Plan,
+    /// Let the provider choose per action.
     Auto,
 }
 
@@ -154,10 +165,15 @@ impl From<PermissionModeChoice> for ClaudePermissionMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AmbientContextChoice {
+    /// Inherit the host's ambient context.
     Inherit,
+    /// Seal project-scoped settings sources.
     HermeticProject,
+    /// Seal every settings source.
     HermeticFull,
+    /// The adapter's safe baseline.
     Safe,
+    /// No ambient context at all.
     Bare,
 }
 

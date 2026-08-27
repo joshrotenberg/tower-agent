@@ -52,6 +52,8 @@
 //! # let _ = (stack, turn);
 //! ```
 
+#![deny(missing_docs)]
+
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -83,15 +85,30 @@ pub const MAX_JSON_SCHEMA_BYTES: usize = 1024 * 1024;
 /// Provider-specific controls for one Claude Code turn.
 #[derive(Clone, Default, PartialEq)]
 pub struct ClaudeOptions {
+    /// System prompt replacing the provider default.
+    ///
+    /// This travels in argv, so it must not carry secrets.
     pub system_prompt: Option<String>,
+    /// Text appended to the provider default system prompt.
+    ///
+    /// This travels in argv, so it must not carry secrets.
     pub append_system_prompt: Option<String>,
+    /// Model to run the turn on. `None` accepts the provider default.
     pub model: Option<String>,
     /// Model to fall back to when the primary model is overloaded.
     pub fallback_model: Option<String>,
+    /// Reasoning effort requested for the turn.
     pub effort: Option<ClaudeEffort>,
+    /// Tools the turn may use. Empty leaves the provider default in place.
     pub allowed_tools: Vec<String>,
+    /// Tools the turn may not use, applied on top of `allowed_tools`.
     pub disallowed_tools: Vec<String>,
+    /// Extra directories to admit beyond the working directory.
+    ///
+    /// The host filesystem authority still bounds these; a directory named
+    /// here that the policy refuses fails validation rather than widening it.
     pub additional_directories: Vec<PathBuf>,
+    /// Ceiling on provider-side turns within this one call.
     pub max_turns: Option<u32>,
     /// CLI-side spend ceiling for the turn, in USD. Exceeding it surfaces
     /// as a typed budget failure with resume and spend evidence.
@@ -170,9 +187,13 @@ pub enum ClaudeHermetic {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Reasoning effort for one Claude turn.
 pub enum ClaudeEffort {
+    /// Least reasoning effort.
     Low,
+    /// Provider default effort.
     Medium,
+    /// Greatest reasoning effort.
     High,
 }
 
@@ -277,10 +298,18 @@ impl ClaudeService {
         self
     }
 
+    /// The configured cap on retained provider output, if any.
+    ///
+    /// `None` means unbounded, matching the wrapper default.
     pub const fn output_limit(&self) -> Option<usize> {
         self.output_limit
     }
 
+    /// Set how long a cancelled child may run before it is killed.
+    ///
+    /// This bounds cleanup, not the call. A drop-time kill cannot prove
+    /// reaping before the adapter returns, so this is not a portable hard
+    /// upper bound on child lifetime.
     pub fn with_kill_grace(mut self, duration: Duration) -> Self {
         self.kill_grace = Some(duration);
         self
@@ -296,6 +325,10 @@ impl ClaudeService {
         self
     }
 
+    /// Whether children are asked to die with this process.
+    ///
+    /// Reports the configured setting, which is not the same as kernel
+    /// support; see [`die_with_parent_supported`](Self::die_with_parent_supported).
     pub const fn die_with_parent(&self) -> bool {
         self.die_with_parent
     }
@@ -320,6 +353,7 @@ impl ClaudeService {
         self
     }
 
+    /// The host-owned policy governing the child environment.
     pub const fn child_environment_policy(&self) -> &ChildEnvironmentPolicy {
         &self.child_environment
     }
@@ -332,6 +366,7 @@ impl ClaudeService {
         self
     }
 
+    /// The host-owned minimum ambient-context mode for every turn.
     pub const fn ambient_context_policy(&self) -> ClaudeAmbientContext {
         self.ambient_context
     }

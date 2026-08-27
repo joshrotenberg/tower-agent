@@ -64,11 +64,17 @@
 //! assert_eq!(error.effects, EffectState::None);
 //! ```
 
+#![deny(missing_docs)]
+
 mod authority;
 mod environment;
 mod error;
 mod event;
 mod fake;
+/// Middleware enforcing this crate's execution invariants.
+///
+/// Each layer states one agent-specific invariant. Ordering matters and
+/// is documented on the individual layers.
 pub mod layer;
 mod process;
 mod request;

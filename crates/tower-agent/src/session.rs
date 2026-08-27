@@ -11,6 +11,10 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// Tag `value` as belonging to `provider`.
+    ///
+    /// The provider tag is what stops one provider's handle from being
+    /// offered to another.
     pub fn new(provider: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             provider: provider.into(),
@@ -18,10 +22,15 @@ impl SessionHandle {
         }
     }
 
+    /// The provider this handle belongs to.
     pub fn provider(&self) -> &str {
         &self.provider
     }
 
+    /// The provider-private handle value.
+    ///
+    /// Never shown by `Debug`. A host that crosses a protocol boundary
+    /// must translate this rather than publish it.
     pub fn value(&self) -> &str {
         &self.value
     }

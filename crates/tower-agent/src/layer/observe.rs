@@ -11,18 +11,34 @@ use tower::{Layer, Service};
 use crate::{AgentError, AgentRequest, EffectState, ErrorKind, FailurePhase, OperationId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A terminal record of one call, emitted exactly once.
+///
+/// Recorded even when the caller vanishes, so a host can account for
+/// work that no longer has anyone waiting on it.
 pub struct Receipt {
+    /// Identity of the call this record describes.
     pub operation_id: OperationId,
+    /// Wall-clock time from entering the layer to settling.
     pub elapsed: Duration,
+    /// How the call ended.
     pub status: ReceiptStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// How a call ended, from the observing layer's point of view.
 pub enum ReceiptStatus {
+    /// The call returned a successful response.
     Succeeded,
+    /// The call returned a typed failure.
+    ///
+    /// Carries the classification rather than the message, so a consumer
+    /// aggregates on stable axes.
     Failed {
+        /// What kind of failure it was.
         kind: ErrorKind,
+        /// How far the call got.
         phase: FailurePhase,
+        /// What is known about external effects.
         effects: EffectState,
     },
     /// The call was dropped before it settled.
@@ -32,36 +48,54 @@ pub enum ReceiptStatus {
     /// it a receipt consumer would have to guess, and would be wrong whenever
     /// it guessed the other way.
     Abandoned {
+        /// What is known about external effects at the moment of the drop.
         effects: EffectState,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+/// Why a receipt could not be delivered.
+///
+/// A dropped receipt is lost accounting, unlike a dropped event.
+/// Size the sink so this does not happen.
 pub enum ReceiptSendError {
     #[error("receipt observer is full")]
+    /// The sink is at capacity. This receipt was discarded.
     Full,
     #[error("receipt observer is closed")]
+    /// The consumer is gone. Later receipts will be discarded too.
     Closed,
 }
 
 /// A nonblocking terminal receipt destination.
 pub trait ReceiptSink: Send + Sync + 'static {
+    /// Record one terminal receipt without blocking.
+    ///
+    /// Called from the call's own path and from `Drop`, so an
+    /// implementation that blocks stalls a settling turn.
     fn try_record(&self, receipt: Receipt) -> Result<(), ReceiptSendError>;
 }
 
 #[derive(Clone)]
+/// A cloneable handle to a [`ReceiptSink`].
 pub struct ReceiptObserver(Arc<dyn ReceiptSink>);
 
 impl ReceiptObserver {
+    /// Record through a caller-supplied sink.
     pub fn new(sink: impl ReceiptSink) -> Self {
         Self(Arc::new(sink))
     }
 
+    /// A channel sink with a fixed capacity.
+    ///
+    /// Receipts are dropped once `capacity` are outstanding, so a consumer
+    /// that stops draining loses accounting.
     pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<Receipt>) {
         let (sender, receiver) = mpsc::channel(capacity);
         (Self::new(ChannelReceiptSink(sender)), receiver)
     }
 
+    /// Record one receipt, discarding it if the sink refuses.
     pub fn try_record(&self, receipt: Receipt) -> Result<(), ReceiptSendError> {
         self.0.try_record(receipt)
     }
@@ -80,11 +114,13 @@ impl fmt::Debug for ReceiptObserver {
 }
 
 #[derive(Clone, Debug)]
+/// Emits one [`Receipt`] per call, including abandoned ones.
 pub struct ObserveLayer {
     observer: ReceiptObserver,
 }
 
 impl ObserveLayer {
+    /// Emit receipts to `observer`.
     pub fn new(observer: ReceiptObserver) -> Self {
         Self { observer }
     }
@@ -102,6 +138,7 @@ impl<S> Layer<S> for ObserveLayer {
 }
 
 #[derive(Clone, Debug)]
+/// The [`ObserveLayer`] service. See that type for behavior.
 pub struct Observe<S> {
     inner: S,
     observer: ReceiptObserver,

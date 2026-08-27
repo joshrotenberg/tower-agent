@@ -5,10 +5,24 @@ use crate::FailureEvidence;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+/// What kind of failure occurred, independent of which provider produced it.
+///
+/// This is the axis a caller switches on. It deliberately says nothing
+/// about whether retrying is safe: that is [`FailurePhase`] and
+/// [`EffectState`], and a caller must read those before acting.
+///
+/// Non-exhaustive: an adapter may learn to distinguish a failure this
+/// crate currently folds into [`Provider`](Self::Provider).
 pub enum ErrorKind {
+    /// The request could not be expressed as a valid provider call.
     InvalidRequest,
+    /// The provider rejected or could not find credentials.
     Authentication,
+    /// Credentials were accepted but do not permit this operation.
     Unauthorized,
+    /// This adapter cannot express what the request asked for.
+    ///
+    /// The request may be valid for a different provider.
     Unsupported,
     /// This host has no capacity right now. The provider was never asked.
     Busy,
@@ -17,11 +31,20 @@ pub enum ErrorKind {
     /// [`ErrorKind::Limit`], which is a quota that a caller has spent.
     /// Retrying elsewhere may succeed where retrying here will not.
     Unavailable,
+    /// The operation ran past a deadline imposed by this host.
     DeadlineExceeded,
+    /// The operation was cancelled by the caller or a supervising layer.
     Cancelled,
+    /// A spend ceiling was reached. Distinct from [`Limit`](Self::Limit):
+    /// this is money, not throughput or size.
     Budget,
+    /// A quota or ceiling was spent, such as a rate limit or an output cap.
     Limit,
+    /// The provider failed in a way that is its own to explain.
+    ///
+    /// The provider's own message is preserved rather than reclassified.
     Provider,
+    /// An invariant inside this crate broke. Always a defect here.
     Internal,
 }
 
@@ -45,11 +68,21 @@ impl fmt::Display for ErrorKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How far a call got before it failed.
+///
+/// Together with [`EffectState`] this is what makes a retry decision
+/// possible: the phase says where the call stopped, the effect state
+/// says what it may have already done.
 pub enum FailurePhase {
+    /// Refused by this host's capacity before any work began.
     Admission,
+    /// Refused while checking the request, before any launch attempt.
     Validation,
+    /// Failed while starting the provider. The process may not exist.
     Launch,
+    /// Failed after the provider started and before it settled.
     Running,
+    /// The provider finished, but its terminal result could not be accepted.
     Settlement,
 }
 
@@ -66,9 +99,18 @@ impl fmt::Display for FailurePhase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What is known about external effects a failed call may have caused.
+///
+/// Agent calls write files, call services, and spend money. A caller
+/// deciding whether repeating the call is safe reads this. The ordering
+/// is deliberately conservative: absence of proof is
+/// [`Possible`](Self::Possible), never [`None`](Self::None).
 pub enum EffectState {
+    /// Nothing ran. Repeating the call cannot duplicate an effect.
     None,
+    /// The provider may have acted. Repeating the call may duplicate work.
     Possible,
+    /// The provider reported effects, and evidence of them is retained.
     Reported,
 }
 
@@ -83,6 +125,10 @@ impl fmt::Display for EffectState {
 }
 
 impl EffectState {
+    /// The more severe of two effect states.
+    ///
+    /// Used when a layer folds an inner failure into an outer one. Severity
+    /// only ever increases, so no layer can downgrade another's evidence.
     pub const fn combine(self, other: Self) -> Self {
         match (self, other) {
             (Self::Reported, _) | (_, Self::Reported) => Self::Reported,
@@ -104,10 +150,18 @@ pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 #[derive(Clone, Debug, thiserror::Error, PartialEq)]
 #[error("{kind}: {message}")]
 pub struct AgentError {
+    /// What kind of failure this is.
     pub kind: ErrorKind,
+    /// Human-readable description. Not a stable classification axis.
     pub message: String,
+    /// How far the call got before failing.
     pub phase: FailurePhase,
+    /// What is known about external effects.
     pub effects: EffectState,
+    /// Terminal accounting retained from a call that failed after producing it.
+    ///
+    /// Boxed because most errors carry none, and absent means the failure
+    /// established none rather than that the values were zero.
     pub evidence: Option<Box<FailureEvidence>>,
     /// How long a limiter or provider asked the caller to wait.
     ///
@@ -119,10 +173,15 @@ pub struct AgentError {
     /// Absent means nobody said, and is never guessed.
     pub retry_after: Option<Duration>,
     #[source]
+    /// The inner failure this one wraps, when a layer folded one in.
     pub cause: Option<Box<AgentError>>,
 }
 
 impl AgentError {
+    /// An error with an explicit classification.
+    ///
+    /// Prefer the named constructors, which fix the phase and effect state
+    /// that go with each kind.
     pub fn new(
         kind: ErrorKind,
         message: impl Into<String>,
@@ -140,6 +199,7 @@ impl AgentError {
         }
     }
 
+    /// A request refused during validation, before anything ran.
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(
             ErrorKind::InvalidRequest,
@@ -226,6 +286,7 @@ impl AgentError {
         )
     }
 
+    /// This host has no capacity. The provider was never asked.
     pub fn busy() -> Self {
         Self::new(
             ErrorKind::Busy,
@@ -235,6 +296,10 @@ impl AgentError {
         )
     }
 
+    /// A deadline elapsed while the call was running.
+    ///
+    /// The caller supplies `effects`, because whether the provider had
+    /// begun is knowable only where the deadline was applied.
     pub fn deadline_exceeded(effects: EffectState) -> Self {
         Self::new(
             ErrorKind::DeadlineExceeded,
@@ -244,6 +309,10 @@ impl AgentError {
         )
     }
 
+    /// The call was cancelled while running.
+    ///
+    /// The caller supplies `effects` for the same reason as
+    /// [`deadline_exceeded`](Self::deadline_exceeded).
     pub fn cancelled(effects: EffectState) -> Self {
         Self::new(
             ErrorKind::Cancelled,
@@ -253,6 +322,7 @@ impl AgentError {
         )
     }
 
+    /// A request this adapter cannot express, refused during validation.
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self::new(
             ErrorKind::Unsupported,
@@ -262,6 +332,12 @@ impl AgentError {
         )
     }
 
+    /// Fold an inner failure into this one.
+    ///
+    /// The inner effect state is combined rather than replaced, its
+    /// evidence fills gaps this error does not already have, and its retry
+    /// guidance is adopted only if this error carries none. An outer layer
+    /// must not erase what an inner one proved.
     pub fn with_cause(mut self, cause: AgentError) -> Self {
         self.effects = self.effects.combine(cause.effects);
         // Guidance from the settled call is better than none from an outer
@@ -279,6 +355,7 @@ impl AgentError {
         self
     }
 
+    /// Attach terminal accounting to this failure.
     pub fn with_evidence(mut self, evidence: FailureEvidence) -> Self {
         self.evidence = Some(Box::new(evidence));
         self

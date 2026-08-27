@@ -110,7 +110,9 @@ impl FakeOptions {
 /// every configured fake.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FakeTerminal {
+    /// Settle successfully with this outcome.
     Success(Box<TurnOutcome>),
+    /// Settle with this typed failure.
     Failure(AgentError),
 }
 
@@ -118,7 +120,9 @@ pub enum FakeTerminal {
 /// turn settles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FakeStep {
+    /// Emit one event, as a real provider would mid-turn.
     Emit(AgentEvent),
+    /// Pause, observing cancellation while it waits.
     Delay(Duration),
 }
 
@@ -148,12 +152,14 @@ pub struct NamedFakeService {
 }
 
 impl NamedFakeService {
+    /// A fake answering to `provider` and no other.
     pub fn new(provider: impl Into<String>) -> Self {
         Self {
             provider: provider.into(),
         }
     }
 
+    /// The provider name this fake claims.
     pub fn provider(&self) -> &str {
         &self.provider
     }

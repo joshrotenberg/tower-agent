@@ -7,7 +7,9 @@ use crate::ProviderId;
 /// Provider planners add provider-conditional requirements with their own
 /// stable identifiers.
 pub mod ids {
+    /// The provider to run the turn on.
     pub const PROVIDER: &str = "provider";
+    /// The user prompt for the turn.
     pub const PROMPT: &str = "prompt";
 }
 
@@ -65,6 +67,8 @@ pub enum RequirementReason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Answer {
+    /// Id of the requirement this answers.
     pub id: String,
+    /// The supplied value, still unvalidated.
     pub value: String,
 }

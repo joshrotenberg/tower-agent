@@ -95,6 +95,8 @@
 //! assert_eq!(resolved.prompt(), "inspect this repository");
 //! ```
 
+#![deny(missing_docs)]
+
 #[cfg(feature = "claude")]
 pub mod claude;
 #[cfg(feature = "codex")]

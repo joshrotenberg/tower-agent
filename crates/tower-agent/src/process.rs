@@ -25,6 +25,7 @@ pub struct SpawnReceipt {
 }
 
 impl SpawnReceipt {
+    /// Record the identity of a freshly spawned provider child.
     pub const fn new(
         provider: &'static str,
         operation_id: OperationId,
@@ -50,10 +51,14 @@ impl SpawnReceipt {
 pub struct SpawnObserver(Arc<dyn Fn(SpawnReceipt) + Send + Sync>);
 
 impl SpawnObserver {
+    /// Observe spawns through a caller-supplied callback.
+    ///
+    /// The callback runs inline on the spawning thread and must not block.
     pub fn new(observer: impl Fn(SpawnReceipt) + Send + Sync + 'static) -> Self {
         Self(Arc::new(observer))
     }
 
+    /// Deliver one receipt to the observer.
     pub fn observe(&self, receipt: SpawnReceipt) {
         (self.0)(receipt);
     }

@@ -14,8 +14,10 @@ use crate::resolve::{Layers, Resolution, ResolvedTurn, resolve};
 #[non_exhaustive]
 pub enum ReadyTurn {
     #[cfg(feature = "claude")]
+    /// A turn compiled for the Claude adapter.
     Claude(tower_agent::Turn<tower_agent_claude::ClaudeOptions>),
     #[cfg(feature = "codex")]
+    /// A turn compiled for the Codex adapter.
     Codex(tower_agent::Turn<tower_agent_codex::CodexOptions>),
 }
 
@@ -65,14 +67,18 @@ pub fn compile(resolved: &ResolvedTurn) -> Result<ReadyTurn, Vec<Diagnostic>> {
 /// The outcome of resolve-then-compile.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Prepared {
+    /// The turn compiled and is ready to run.
     Ready(ReadyTurn),
+    /// Coherent but incomplete. Elicit the requirements and resolve again.
     Missing {
         /// The merged view the requirements were derived from.
         resolved: PartialTurn,
         /// Unresolved values in deterministic order.
         requirements: Vec<Requirement>,
     },
+    /// Refused. Every diagnostic is an error, and none is elicitable.
     Invalid {
+        /// What was wrong, in deterministic order.
         diagnostics: Vec<Diagnostic>,
     },
 }

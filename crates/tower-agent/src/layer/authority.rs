@@ -13,14 +13,17 @@ pub struct AuthorityLayer {
 }
 
 impl AuthorityLayer {
+    /// Enforce `policy` before every launch.
     pub const fn new(policy: AuthorityPolicy) -> Self {
         Self { policy }
     }
 
+    /// Enforce the default read-only policy.
     pub const fn read_only() -> Self {
         Self::new(AuthorityPolicy::read_only())
     }
 
+    /// The policy being enforced.
     pub const fn policy(&self) -> &AuthorityPolicy {
         &self.policy
     }
@@ -44,6 +47,7 @@ impl<S> Layer<S> for AuthorityLayer {
 }
 
 #[derive(Clone, Debug)]
+/// The [`AuthorityLayer`] service. See that type for behavior.
 pub struct EnforceAuthority<S> {
     inner: S,
     policy: AuthorityPolicy,
@@ -113,5 +117,36 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Unauthorized);
         assert_eq!(error.effects, EffectState::None);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_authority_within_the_ceiling_reaches_the_provider() {
+        let provider = service_fn(|request: AgentRequest<Turn<Options>>| async move {
+            Ok::<_, AgentError>(TurnOutcome::new(request.body.prompt))
+        });
+        let service = AuthorityLayer::read_only().layer(provider);
+        let request = AgentRequest::new(
+            Turn::new("read a file").with_options(Options(FilesystemAuthority::ReadOnly)),
+        );
+
+        let outcome = service
+            .oneshot(request)
+            .await
+            .expect("a request within the ceiling is forwarded");
+        assert_eq!(outcome.output, "read a file");
+    }
+
+    #[test]
+    fn the_default_layer_enforces_the_read_only_policy() {
+        // The default must not be more permissive than the named constructor,
+        // because a host that omits a policy gets this one.
+        assert_eq!(
+            AuthorityLayer::default().policy(),
+            AuthorityLayer::read_only().policy()
+        );
+        assert_eq!(
+            AuthorityLayer::default().policy().filesystem_ceiling(),
+            FilesystemAuthority::ReadOnly
+        );
     }
 }

@@ -15,6 +15,10 @@ pub struct AdmissionLayer {
 }
 
 impl AdmissionLayer {
+    /// Admit at most `max_concurrency` calls at once.
+    ///
+    /// Clones share one limit, so cloning the service does not multiply
+    /// the capacity.
     pub fn new(max_concurrency: usize) -> Self {
         assert!(max_concurrency > 0, "admission limit must be nonzero");
         Self {
@@ -22,6 +26,7 @@ impl AdmissionLayer {
         }
     }
 
+    /// Admit one call at a time.
     pub fn single_flight() -> Self {
         Self::new(1)
     }

@@ -52,6 +52,7 @@ impl ChildEnvironmentPolicy {
         self
     }
 
+    /// Whether the child starts from the host environment.
     pub const fn inherits_ambient(&self) -> bool {
         self.inherit_ambient
     }
@@ -116,10 +117,14 @@ pub struct ResolvedChildEnvironment {
 }
 
 impl ResolvedChildEnvironment {
+    /// Whether the adapter must clear the inherited environment first.
     pub const fn clear_inherited(&self) -> bool {
         self.clear_inherited
     }
 
+    /// The resolved variables, ordered by key.
+    ///
+    /// Values are the real ones, unlike `Debug`, which shows keys only.
     pub fn variables(&self) -> impl Iterator<Item = (&str, &str)> {
         self.variables
             .iter()
@@ -137,13 +142,25 @@ impl fmt::Debug for ResolvedChildEnvironment {
 }
 
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+/// Why a child environment could not be resolved.
+///
+/// Every variant is raised before launch, so no child exists yet.
 pub enum ChildEnvironmentError {
     #[error("child environment variable name is invalid")]
+    /// A key was empty or contained `=` or a NUL byte.
     InvalidKey,
     #[error("child environment variable {key} contains an invalid value")]
-    InvalidValue { key: String },
+    /// A value contained a NUL byte.
+    InvalidValue {
+        /// The offending variable name.
+        key: String,
+    },
     #[error("allowlisted host environment variable {key} is not valid UTF-8")]
-    NonUnicodeAmbientValue { key: String },
+    /// An allowlisted host value was not valid UTF-8.
+    NonUnicodeAmbientValue {
+        /// The allowlisted variable whose host value was not UTF-8.
+        key: String,
+    },
 }
 
 fn validate_key(key: &str) -> Result<(), ChildEnvironmentError> {
