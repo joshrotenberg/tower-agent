@@ -3,11 +3,21 @@ use std::time::Duration;
 use crate::SessionHandle;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Token accounting reported by a provider for one turn.
+///
+/// Every bucket is optional because providers report different subsets.
+/// An absent bucket means the provider said nothing, which is not the
+/// same as a reported zero; see [`total`](Self::total).
 pub struct TokenUsage {
+    /// Fresh input tokens billed for this turn.
     pub input: Option<u64>,
+    /// Input tokens served from a provider cache.
     pub cached_input: Option<u64>,
+    /// Input tokens written into a provider cache.
     pub cache_write_input: Option<u64>,
+    /// Tokens generated as turn output.
     pub output: Option<u64>,
+    /// Tokens spent on reasoning that is not part of the output.
     pub reasoning_output: Option<u64>,
     /// Total computed or explicitly reported by the provider adapter.
     pub provider_total: Option<u64>,
@@ -31,6 +41,10 @@ impl TokenUsage {
         })
     }
 
+    /// Whether the provider reported no accounting at all.
+    ///
+    /// A single reported zero makes this `false`: zero is a measurement,
+    /// absence is not.
     pub const fn is_empty(self) -> bool {
         self.input.is_none()
             && self.cached_input.is_none()
@@ -42,12 +56,16 @@ impl TokenUsage {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// A provider-reported monetary amount for one turn.
 pub struct Cost {
+    /// The amount spent, in units of `currency`.
     pub amount: f64,
+    /// ISO 4217 currency code the provider reported the amount in.
     pub currency: String,
 }
 
 impl Cost {
+    /// A cost in United States dollars.
     pub fn usd(amount: f64) -> Self {
         Self {
             amount,
@@ -59,6 +77,7 @@ impl Cost {
 /// The typed terminal result of one finite turn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnOutcome {
+    /// The provider's final textual output for the turn.
     pub output: String,
     /// The schema-constrained payload a provider validated, when one was
     /// requested.
@@ -69,10 +88,17 @@ pub struct TurnOutcome {
     /// and did not receive it fails settlement instead of succeeding with an
     /// absent payload.
     pub structured: Option<serde_json::Value>,
+    /// Provider-private handle for continuing this conversation.
+    ///
+    /// Redacted in `Debug`, and meaningless to any other provider.
     pub session: Option<SessionHandle>,
+    /// Token accounting, when the provider reported any.
     pub usage: Option<TokenUsage>,
+    /// Monetary cost, when the provider reported it.
     pub cost: Option<Cost>,
+    /// Wall-clock duration the provider attributed to the turn.
     pub duration: Option<Duration>,
+    /// Provider-side turns consumed inside this one call.
     pub provider_turns: Option<u32>,
 }
 
@@ -84,14 +110,26 @@ pub struct TurnOutcome {
 /// crossing a protocol boundary.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FailureEvidence {
+    /// Provider-private continuation handle, when one was established.
+    ///
+    /// Present after a failure means the work is resumable even though the
+    /// call failed.
     pub session: Option<SessionHandle>,
+    /// Token accounting established before the failure.
     pub usage: Option<TokenUsage>,
+    /// Monetary cost already incurred before the failure.
     pub cost: Option<Cost>,
+    /// Wall-clock duration attributed to the failed turn.
     pub duration: Option<Duration>,
+    /// Provider-side turns consumed before the failure.
     pub provider_turns: Option<u32>,
 }
 
 impl FailureEvidence {
+    /// Fill only the fields this evidence still lacks.
+    ///
+    /// Existing values win. An outer layer merging inner evidence must not
+    /// overwrite a fact it already established with a less specific one.
     pub fn merge_missing(&mut self, other: &Self) {
         if self.session.is_none() {
             self.session.clone_from(&other.session);
@@ -112,6 +150,7 @@ impl FailureEvidence {
 }
 
 impl TurnOutcome {
+    /// An outcome carrying output and no accounting evidence.
     pub fn new(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),

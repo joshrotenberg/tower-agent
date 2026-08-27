@@ -48,6 +48,7 @@ impl fmt::Display for FilesystemAuthority {
 
 /// Provider options that carry a portable filesystem-authority request.
 pub trait RequestsFilesystemAuthority {
+    /// The filesystem authority this turn's options ask for.
     fn filesystem_authority(&self) -> FilesystemAuthority;
 
     /// Extra roots requested for the provider invocation.
@@ -70,6 +71,7 @@ pub struct AuthorityPolicy {
 }
 
 impl AuthorityPolicy {
+    /// A policy with an explicit ceiling and no writable roots.
     pub const fn new(filesystem_ceiling: FilesystemAuthority) -> Self {
         Self {
             filesystem_ceiling,
@@ -77,14 +79,20 @@ impl AuthorityPolicy {
         }
     }
 
+    /// The default policy: inspection only, no writes anywhere.
     pub const fn read_only() -> Self {
         Self::new(FilesystemAuthority::ReadOnly)
     }
 
+    /// The most permissive authority any turn may request.
     pub const fn filesystem_ceiling(&self) -> FilesystemAuthority {
         self.filesystem_ceiling
     }
 
+    /// Directories a turn may name as writable roots.
+    ///
+    /// A root outside this list is refused before launch rather than
+    /// silently narrowed.
     pub fn writable_roots(&self) -> &[PathBuf] {
         &self.writable_roots
     }
@@ -222,5 +230,70 @@ mod tests {
             .expect_err("a sibling crate is outside the approved root");
         assert_eq!(error.kind, ErrorKind::Unauthorized);
         assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[test]
+    fn a_root_that_cannot_be_resolved_is_malformed_rather_than_unauthorized() {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let policy = AuthorityPolicy::new(FilesystemAuthority::WorkspaceWrite)
+            .allow_writable_root(crate_root.join("src"))
+            .expect("source directory exists");
+        let turn = Turn::new("edit")
+            .with_options(Options {
+                authority: FilesystemAuthority::WorkspaceWrite,
+                roots: Vec::new(),
+            })
+            .in_directory(crate_root.join("src/does-not-exist"));
+
+        let error = policy
+            .authorize(&turn)
+            .expect_err("an unresolvable root cannot be authorized");
+        // Unresolvable is not the same as refused: the caller supplied a path
+        // that does not name anything, which is a malformed request, not an
+        // attempt to exceed the host ceiling. Reporting Unauthorized here
+        // would tell a caller to reduce authority that was never the problem.
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        assert_eq!(error.phase, FailurePhase::Validation);
+        assert_eq!(error.effects, EffectState::None);
+    }
+
+    #[test]
+    fn the_default_policy_permits_no_writes_anywhere() {
+        let policy = AuthorityPolicy::default();
+        assert_eq!(policy.filesystem_ceiling(), FilesystemAuthority::ReadOnly);
+        assert!(policy.writable_roots().is_empty());
+        assert_eq!(policy, AuthorityPolicy::read_only());
+    }
+
+    #[test]
+    fn options_that_name_no_extra_roots_request_none() {
+        struct PlainOptions;
+        impl RequestsFilesystemAuthority for PlainOptions {
+            fn filesystem_authority(&self) -> FilesystemAuthority {
+                FilesystemAuthority::WorkspaceWrite
+            }
+        }
+
+        // The default trait method is what every provider option type that
+        // does not carry extra roots relies on.
+        assert!(PlainOptions.additional_filesystem_roots().is_empty());
+
+        // With no working directory and no extra roots there is nothing to
+        // contain, so a workspace-write request is authorized on its level
+        // alone. An omitted directory stays host-owned ambient configuration.
+        AuthorityPolicy::new(FilesystemAuthority::WorkspaceWrite)
+            .authorize(&Turn::new("edit").with_options(PlainOptions))
+            .expect("nothing to contain");
+    }
+
+    #[test]
+    fn full_access_is_representable_and_never_broadened_by_intersection() {
+        assert_eq!(FilesystemAuthority::FullAccess.to_string(), "full_access");
+        assert_eq!(
+            FilesystemAuthority::FullAccess.intersect(FilesystemAuthority::FullAccess),
+            FilesystemAuthority::FullAccess
+        );
+        // Full access is never path-contained, so it needs an explicit ceiling.
+        assert!(!FilesystemAuthority::WorkspaceWrite.allows(FilesystemAuthority::FullAccess));
     }
 }

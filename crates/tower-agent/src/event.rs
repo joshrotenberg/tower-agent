@@ -8,29 +8,53 @@ use crate::TokenUsage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+/// An incremental observation of a call in progress.
+///
+/// Events are advisory. They are delivered on a nonblocking path that
+/// drops rather than stalls a turn, so no event is proof of anything:
+/// terminal facts come from the response or the failure evidence.
+///
+/// Non-exhaustive: providers report observations this set does not name
+/// yet, and adding one must not break a consumer.
 pub enum AgentEvent {
     /// The service accepted the operation and began an attempt. This does not
     /// prove that a provider subprocess has spawned successfully.
     Started,
+    /// A fragment of the turn's output text.
     OutputDelta {
+        /// The fragment, not the accumulated output.
         text: String,
     },
+    /// A fragment of the provider's reasoning, when it exposes any.
     ThinkingDelta {
+        /// The fragment, not the accumulated reasoning.
         text: String,
     },
+    /// The provider began invoking a tool.
     ToolStarted {
+        /// Provider-reported tool name, not validated by this crate.
         name: String,
     },
+    /// The provider began a turn inside this call.
     TurnStarted {
+        /// Provider-side turn number within this one call.
         number: u32,
     },
+    /// Provider progress text with no defined structure.
     Status {
+        /// The status text as the provider phrased it.
         message: String,
     },
+    /// Token accounting reported partway through the call.
+    ///
+    /// Superseded by the accounting on the terminal result.
     Usage {
+        /// Accounting as of this observation, not a running total.
         usage: TokenUsage,
     },
+    /// The provider reported a condition it did not treat as fatal.
     Warning {
+        /// The warning as the provider phrased it.
         message: String,
     },
 }
@@ -68,6 +92,7 @@ pub struct EventLimits {
 }
 
 impl EventLimits {
+    /// Ceilings for one event and for the unconsumed backlog.
     pub const fn new(max_event_bytes: usize, max_queued_bytes: usize) -> Self {
         Self {
             max_event_bytes,
@@ -85,26 +110,45 @@ impl Default for EventLimits {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+/// Why an event could not be delivered.
+///
+/// Both variants mean the observation was dropped. Neither fails the
+/// turn: observation is advisory.
 pub enum EventSendError {
     #[error("event observer is full")]
+    /// A ceiling was reached. The turn continues without this event.
     Full,
     #[error("event observer is closed")]
+    /// The consumer is gone. Later events will be dropped too.
     Closed,
 }
 
 /// A nonblocking destination for incremental provider observations.
 pub trait EventSink: Send + Sync + 'static {
+    /// Deliver one event without blocking.
+    ///
+    /// Called on the turn's own path, so an implementation that blocks
+    /// stalls the call it is observing. Drop instead.
     fn try_emit(&self, event: AgentEvent) -> Result<(), EventSendError>;
 }
 
 #[derive(Clone)]
+/// A cloneable handle to an [`EventSink`].
+///
+/// Cloning shares one sink, so every clone observes the same call.
 pub struct EventObserver(Arc<dyn EventSink>);
 
 impl EventObserver {
+    /// Observe through a caller-supplied sink.
     pub fn new(sink: impl EventSink) -> Self {
         Self(Arc::new(sink))
     }
 
+    /// A channel bounded by item count only.
+    ///
+    /// One event can carry an entire provider output, so this bounds items
+    /// but not memory. Use [`bounded_channel`](Self::bounded_channel) when
+    /// the payload size is not already known to be small.
     pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<AgentEvent>) {
         let (sender, receiver) = mpsc::channel(capacity);
         (Self::new(ChannelEventSink(sender)), receiver)
@@ -126,6 +170,7 @@ impl EventObserver {
         (Self::new(sink), BoundedEventReceiver { receiver, queued })
     }
 
+    /// Deliver one event, dropping it if a ceiling or the consumer refuses.
     pub fn try_emit(&self, event: AgentEvent) -> Result<(), EventSendError> {
         self.0.try_emit(event)
     }
@@ -158,6 +203,7 @@ pub struct BoundedEventReceiver {
 }
 
 impl BoundedEventReceiver {
+    /// Await the next event, releasing its bytes from the backlog budget.
     pub async fn recv(&mut self) -> Option<AgentEvent> {
         let event = self.receiver.recv().await?;
         self.queued
@@ -165,6 +211,7 @@ impl BoundedEventReceiver {
         Some(event)
     }
 
+    /// Take a ready event without waiting, releasing its bytes.
     pub fn try_recv(&mut self) -> Option<AgentEvent> {
         let event = self.receiver.try_recv().ok()?;
         self.queued

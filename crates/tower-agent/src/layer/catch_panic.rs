@@ -13,6 +13,7 @@ use crate::{AgentError, EffectState, ErrorKind, FailurePhase};
 pub struct CatchPanicLayer;
 
 impl CatchPanicLayer {
+    /// Normalize panics from the inner service.
     pub const fn new() -> Self {
         Self
     }
@@ -27,6 +28,7 @@ impl<S> Layer<S> for CatchPanicLayer {
 }
 
 #[derive(Clone, Debug)]
+/// The [`CatchPanicLayer`] service. See that type for behavior.
 pub struct CatchPanic<S> {
     inner: S,
 }

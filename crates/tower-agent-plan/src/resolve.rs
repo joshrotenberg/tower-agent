@@ -18,10 +18,12 @@ pub struct ProviderDefaults {
 }
 
 impl ProviderDefaults {
+    /// Set one provider's baseline, returning any it replaced.
     pub fn insert(&mut self, provider: ProviderId, defaults: PartialTurn) -> Option<PartialTurn> {
         self.map.insert(provider, defaults)
     }
 
+    /// One provider's baseline, if set.
     pub fn get(&self, provider: ProviderId) -> Option<&PartialTurn> {
         self.map.get(&provider)
     }
@@ -42,6 +44,7 @@ pub struct Layers<'a> {
 }
 
 impl<'a> Layers<'a> {
+    /// Layers with only the caller's explicit values bound.
     pub fn new(explicit: &'a PartialTurn) -> Self {
         Self {
             provider_defaults: None,
@@ -52,21 +55,25 @@ impl<'a> Layers<'a> {
         }
     }
 
+    /// Add provider baselines, the lowest-precedence layer.
     pub fn with_provider_defaults(mut self, defaults: &'a ProviderDefaults) -> Self {
         self.provider_defaults = Some(defaults);
         self
     }
 
+    /// Add application defaults, above provider baselines.
     pub fn with_application_defaults(mut self, defaults: &'a PartialTurn) -> Self {
         self.application_defaults = Some(defaults);
         self
     }
 
+    /// Add a saved profile, above application defaults.
     pub fn with_profile(mut self, profile: &'a Profile) -> Self {
         self.profile = Some(profile);
         self
     }
 
+    /// Add elicited answers, which fill only still-unbound paths.
     pub fn with_answers(mut self, answers: &'a [Answer]) -> Self {
         self.answers = answers;
         self
@@ -80,14 +87,18 @@ impl<'a> Layers<'a> {
 /// is coherent but incomplete, and `Complete` otherwise.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Resolution {
+    /// Every shared requirement is bound and structurally valid.
     Complete(ResolvedTurn),
+    /// Coherent but incomplete. Elicit the requirements and resolve again.
     Missing {
         /// The merged view the requirements were derived from.
         resolved: PartialTurn,
         /// Unresolved values in deterministic order.
         requirements: Vec<Requirement>,
     },
+    /// Refused. Invalid values take priority over eliciting more.
     Invalid {
+        /// What was wrong, in deterministic order.
         diagnostics: Vec<Diagnostic>,
     },
 }
@@ -105,12 +116,14 @@ pub struct ResolvedTurn {
 }
 
 impl ResolvedTurn {
+    /// The bound provider.
     pub fn provider(&self) -> ProviderId {
         self.merged
             .provider
             .expect("resolve guarantees a bound provider")
     }
 
+    /// The bound prompt.
     pub fn prompt(&self) -> &str {
         self.merged
             .prompt
@@ -118,10 +131,12 @@ impl ResolvedTurn {
             .expect("resolve guarantees a bound prompt")
     }
 
+    /// The merged view behind this resolution.
     pub fn partial(&self) -> &PartialTurn {
         &self.merged
     }
 
+    /// Take the merged view, consuming this resolution.
     pub fn into_partial(self) -> PartialTurn {
         self.merged
     }

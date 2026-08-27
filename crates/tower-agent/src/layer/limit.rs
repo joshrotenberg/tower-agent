@@ -24,6 +24,7 @@ pub struct LimitOutputLayer {
 }
 
 impl LimitOutputLayer {
+    /// Refuse responses whose payload exceeds `max_bytes`.
     pub const fn new(max_bytes: usize) -> Self {
         Self { max_bytes }
     }
@@ -41,6 +42,7 @@ impl<S> Layer<S> for LimitOutputLayer {
 }
 
 #[derive(Clone, Debug)]
+/// The [`LimitOutputLayer`] service. See that type for behavior.
 pub struct LimitOutput<S> {
     inner: S,
     max_bytes: usize,
@@ -87,6 +89,7 @@ where
 
 /// A response whose payload size a host may bound.
 pub trait BoundedOutput {
+    /// Payload bytes a caller would receive from this response.
     fn output_bytes(&self) -> usize;
 }
 

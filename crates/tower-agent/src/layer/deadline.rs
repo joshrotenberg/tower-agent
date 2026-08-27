@@ -7,9 +7,13 @@ use tower::{Layer, Service};
 use crate::{AgentError, AgentRequest, EffectState, TerminalEvidence};
 
 #[derive(Clone, Copy, Debug, Default)]
+/// Enforces the deadline carried on each request's context.
+///
+/// A request without a deadline passes through untouched.
 pub struct DeadlineLayer;
 
 impl DeadlineLayer {
+    /// Enforce request-carried deadlines.
     pub const fn new() -> Self {
         Self
     }
@@ -24,6 +28,7 @@ impl<S> Layer<S> for DeadlineLayer {
 }
 
 #[derive(Clone, Debug)]
+/// The [`DeadlineLayer`] service. See that type for behavior.
 pub struct Deadline<S> {
     inner: S,
 }

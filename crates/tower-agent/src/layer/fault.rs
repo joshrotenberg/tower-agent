@@ -28,7 +28,13 @@ pub enum Fault {
     ///
     /// Nothing runs, so this is the one injected failure that may honestly
     /// carry `EffectState::None`.
-    RefuseBeforeLaunch { kind: ErrorKind, message: String },
+    /// The failure to raise, classified as a pre-launch refusal.
+    RefuseBeforeLaunch {
+        /// Kind to report. The phase and effect state are fixed.
+        kind: ErrorKind,
+        /// Message to report.
+        message: String,
+    },
     /// Let the call run, then hold its settled result before returning it.
     ///
     /// Terminal evidence arriving late is the shape that breaks deadline and
@@ -40,7 +46,13 @@ pub enum Fault {
     /// The settlement becomes the cause, so its evidence and effect state
     /// survive. The injected failure never claims to know less about effects
     /// than the call it wrapped.
-    FailAfterSettlement { kind: ErrorKind, message: String },
+    /// The failure to raise, classified as a post-settlement failure.
+    FailAfterSettlement {
+        /// Kind to report. The phase and effect state are fixed.
+        kind: ErrorKind,
+        /// Message to report.
+        message: String,
+    },
 }
 
 /// Deterministic fault injection for testing cancellation and settlement.
@@ -92,6 +104,7 @@ impl<S> Layer<S> for FaultLayer {
 }
 
 #[derive(Clone, Debug)]
+/// The [`FaultLayer`] service. See that type for behavior.
 pub struct InjectFaults<S> {
     inner: S,
     script: Arc<Mutex<VecDeque<Fault>>>,

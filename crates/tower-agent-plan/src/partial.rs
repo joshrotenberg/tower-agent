@@ -70,9 +70,11 @@ impl PartialTurn {
 pub struct PartialProviderOptions {
     #[cfg(feature = "claude")]
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Claude-specific values, merged only when Claude is selected.
     pub claude: Option<crate::claude::PartialClaudeOptions>,
     #[cfg(feature = "codex")]
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Codex-specific values, merged only when Codex is selected.
     pub codex: Option<crate::codex::PartialCodexOptions>,
 }
 
@@ -198,8 +200,11 @@ impl PartialPermissions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilesystemChoice {
+    /// Inspect the filesystem without modifying it.
     ReadOnly,
+    /// Write within the working directory.
     WorkspaceWrite,
+    /// Write anywhere the host permits.
     FullAccess,
 }
 
@@ -240,6 +245,7 @@ pub struct ResumeBinding {
 }
 
 impl ResumeBinding {
+    /// Bind a resume value to the provider that minted it.
     pub fn new(provider: ProviderId, value: impl Into<String>) -> Self {
         Self {
             provider,
@@ -247,6 +253,7 @@ impl ResumeBinding {
         }
     }
 
+    /// The resume value. Redacted in `Debug`.
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -276,7 +283,9 @@ impl fmt::Debug for ResumeBinding {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    /// The name this profile is saved under.
     pub name: String,
+    /// The partial turn this profile supplies.
     pub turn: PartialTurn,
 }
 

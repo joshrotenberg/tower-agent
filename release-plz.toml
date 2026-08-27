@@ -41,3 +41,15 @@ release = false
 [[package]]
 name = "apalis-local-example"
 release = false
+
+[[package]]
+name = "tower-agent-plan"
+release = false
+
+[[package]]
+name = "repository-worker-example"
+release = false
+
+[[package]]
+name = "apalis-durable-example"
+release = false
