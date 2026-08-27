@@ -38,6 +38,20 @@ evidence back out. They do not own execution policy.
 - `effects`: whether external effects are absent, possible, or reported;
 - `evidence`: partial terminal facts such as session, spend, usage, or turns.
 
+Pre-launch rejections stay distinguishable without parsing messages. `Busy` is
+this host's own capacity, `Unavailable` is the provider or a dependency not
+serving, and `Limit` is a quota a caller has spent. A host holding a second
+provider should act on those differently, which it cannot do if they collapse
+into one kind.
+
+`retry_after` carries what a limiter or provider said about waiting. It is
+timing and never permission: whether an operation may be attempted again is
+decided by effect state alone, so guidance to wait a minute says nothing about
+whether the first attempt already spent money or wrote files. It is clamped to
+`MAX_RETRY_AFTER`, because a host that sleeps on an unbounded value stalls a
+worker indefinitely, and it stays absent rather than guessed when nobody
+said.
+
 An outer deadline or cancellation error keeps the provider settlement as its
 cause and merges missing evidence upward. This lets accounting reconcile a
 reservation and lets a host offer continuation even when the turn hit a cap.

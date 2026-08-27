@@ -58,11 +58,15 @@ fn request(prompt: &str) -> AgentRequest<Turn<FakeOptions>> {
 fn map_rate_limiter_error(error: RateLimiterServiceError<AgentError>) -> AgentError {
     match error {
         RateLimiterServiceError::Inner(error) => error,
+        // A quota the caller has spent, so it stays Limit. Guidance says
+        // when to come back; the effect state still decides whether the
+        // operation may be tried again at all.
         RateLimiterServiceError::RateLimited => AgentError::new(
             ErrorKind::Limit,
             "agent provider quota is exhausted",
             FailurePhase::Admission,
             EffectState::None,
-        ),
+        )
+        .with_retry_after(Duration::from_secs(1)),
     }
 }

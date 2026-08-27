@@ -105,11 +105,11 @@ fn classify_provider_health(result: &Result<TurnOutcome, AgentError>) -> bool {
 fn map_breaker_error(error: CircuitBreakerError<AgentError>) -> AgentError {
     match error {
         CircuitBreakerError::Inner(error) => error,
-        CircuitBreakerError::OpenCircuit => AgentError::new(
-            ErrorKind::Busy,
-            "agent provider circuit is open",
-            FailurePhase::Admission,
-            EffectState::None,
-        ),
+        // Unavailable, not Busy: this host has capacity, the provider is
+        // the thing that is down. A caller that can reach another provider
+        // should, and one that cannot should wait rather than retry now.
+        CircuitBreakerError::OpenCircuit => {
+            AgentError::unavailable("agent provider circuit is open")
+        }
     }
 }
