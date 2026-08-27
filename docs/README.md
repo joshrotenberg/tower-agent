@@ -4,6 +4,8 @@
   lifecycle, and middleware opportunities.
 - [`plan.md`](plan.md): planning-crate decision record, precedence and merge
   laws, and the retargeting away from argv compilation.
+- [`durable-host-report.md`](durable-host-report.md): what survives a restart,
+  the storage-backend finding, and why durability lives in the host store.
 - [`mechanical-steps.md`](mechanical-steps.md): the boundary a subprocess
   step runner would have to hold, and why the decision is to defer one.
 - [`workflow-host-report.md`](workflow-host-report.md): what the workflow

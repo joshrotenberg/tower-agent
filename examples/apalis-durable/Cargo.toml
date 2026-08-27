@@ -1,0 +1,22 @@
+[package]
+name = "apalis-durable-example"
+description = "Restart recovery for a workflow host backed by persistent Apalis storage"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+# The only storage backend published against apalis 1.0.0-rc.9. Every SQL and
+# Redis backend still caps at rc.8; see README.md for the matrix.
+apalis = { version = "=1.0.0-rc.9", default-features = false }
+apalis-file-storage = { version = "=0.1.0-rc.9" }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tower.workspace = true
+tower-agent.workspace = true
+tower-agent-workflow.workspace = true
