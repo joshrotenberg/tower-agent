@@ -4,6 +4,7 @@
 check:
     cargo fmt --all -- --check
     ./scripts/check-core-deps.sh
+    ./scripts/check-license-files.sh
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
     just check-feature-matrix
     cargo test --workspace --all-targets --all-features --locked

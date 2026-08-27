@@ -38,6 +38,9 @@ jobs:
       - name: Check core dependency boundary
         run: ./scripts/check-core-deps.sh
 
+      - name: Check license files
+        run: ./scripts/check-license-files.sh
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
