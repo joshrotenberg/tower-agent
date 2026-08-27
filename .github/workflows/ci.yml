@@ -69,3 +69,14 @@ jobs:
           -p tower-agent-claude
           -p tower-agent-codex
           --allow-dirty --locked --no-verify
+
+      # --all-targets only builds examples, so an example can carry a wrong
+      # assertion indefinitely. These use fake providers and need no
+      # credentials, so a failure is a real defect.
+      - name: Run the library examples
+        run: |
+          cargo run -q -p tower-agent --all-features --locked --example bulkhead
+          cargo run -q -p tower-agent --all-features --locked --example circuit_breaker
+          cargo run -q -p tower-agent --all-features --locked --example health_gated_circuit
+          cargo run -q -p tower-agent --all-features --locked --example rate_limiter
+          cargo run -q -p tower-agent-plan --features claude --locked --example elicitation_loop

@@ -24,3 +24,7 @@ tower-agent-codex = { workspace = true, optional = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tokio = { workspace = true }
+
+[[example]]
+name = "elicitation_loop"
+required-features = ["claude"]

@@ -105,7 +105,20 @@ for everyone.
 
 Half-open probes must be explicitly non-effectful or isolated. A probe that
 runs a real turn to see whether the provider recovered is a turn that can
-spend money and change a repository.
+spend money and change a repository. It is also issued at the moment the
+provider is least trusted, and it cannot be repeated freely, because each
+attempt is another effect.
+
+An effectful provider should therefore recover on an explicit signal instead.
+A health operation is cheap, repeatable while the circuit is open, and risks
+no work to answer, so it can be asked as often as needed. That makes the
+circuit a switch the host controls rather than one that flips itself.
+
+This needs manual circuit control, available from **`tower-resilience`
+0.13.0**: `manual_mode` disables the sliding window, the half-open thresholds,
+and the recovery timer, and `CircuitBreakerHandle::{force_open, force_closed,
+reset}` are deterministic, so once one returns every clone of every service
+from that layer observes the new state with no sleep or poll loop.
 
 ## Runnable examples
 
@@ -115,7 +128,11 @@ executable rather than described:
 - [`circuit_breaker.rs`](../crates/tower-agent/examples/circuit_breaker.rs):
   opens on provider failures, reports `Unavailable` rather than `Busy`,
   because an open circuit is the provider being down and not this host being
-  full.
+  full. Recovers through an automatic half-open probe, which is safe only
+  because the fake provider is scripted and non-effectful.
+- [`health_gated_circuit.rs`](../crates/tower-agent/examples/health_gated_circuit.rs):
+  the effectful case. A manual-mode circuit that no threshold or timer moves,
+  recovered by a dedicated health operation rather than by an `AgentRequest`.
 - [`rate_limiter.rs`](../crates/tower-agent/examples/rate_limiter.rs): a spent
   quota, reported as `Limit` with bounded `retry_after` guidance.
 - [`bulkhead.rs`](../crates/tower-agent/examples/bulkhead.rs): capacity

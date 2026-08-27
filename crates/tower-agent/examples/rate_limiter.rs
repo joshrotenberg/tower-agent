@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .limit_for_period(1)
         .refresh_period(Duration::from_secs(60))
         .timeout_duration(Duration::ZERO)
-        .build();
+        .build()?;
 
     let limited = quota.layer(FakeService).map_err(map_rate_limiter_error);
 

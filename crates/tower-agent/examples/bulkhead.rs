@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .name("fake-provider-account")
         .max_concurrent_calls(1)
         .reject_when_full()
-        .build();
+        .build()?;
     let partitioned = provider_partition
         .layer(FakeService)
         .map_err(map_bulkhead_error);
@@ -83,6 +83,24 @@ fn map_bulkhead_error(error: BulkheadServiceError<AgentError>) -> AgentError {
         ) => AgentError::new(
             ErrorKind::Busy,
             "agent provider partition is at capacity",
+            FailurePhase::Admission,
+            EffectState::None,
+        ),
+        // A closed partition is not a full one. Capacity will not come back,
+        // so a caller that waits here waits forever, while one that can reach
+        // another host may still succeed.
+        BulkheadServiceError::Bulkhead(BulkheadError::Closed) => AgentError::new(
+            ErrorKind::Unavailable,
+            "agent provider partition is closed",
+            FailurePhase::Admission,
+            EffectState::None,
+        ),
+        // Reported when `call` runs without a successful `poll_ready`
+        // reservation. That is this host breaking the Service contract, not
+        // the provider misbehaving, so it must not read as backpressure.
+        BulkheadServiceError::Bulkhead(BulkheadError::NotReady) => AgentError::new(
+            ErrorKind::Internal,
+            "bulkhead called without a readiness reservation",
             FailurePhase::Admission,
             EffectState::None,
         ),

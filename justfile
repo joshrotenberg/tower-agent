@@ -10,6 +10,18 @@ check:
     cargo test --workspace --doc --all-features --locked
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --locked --no-deps
     cargo package -p tower-agent -p tower-agent-claude -p tower-agent-codex --allow-dirty --locked --no-verify
+    just check-examples
+
+# Execute the library examples. `--all-targets` only builds them, so an
+# example can carry a wrong assertion indefinitely without anyone noticing.
+# All of these use fake providers and need no credentials, so a failure here
+# is a real defect rather than a missing environment.
+check-examples:
+    cargo run -q -p tower-agent --all-features --locked --example bulkhead
+    cargo run -q -p tower-agent --all-features --locked --example circuit_breaker
+    cargo run -q -p tower-agent --all-features --locked --example health_gated_circuit
+    cargo run -q -p tower-agent --all-features --locked --example rate_limiter
+    cargo run -q -p tower-agent-plan --features claude --locked --example elicitation_loop
 
 # Lint the provider-feature combinations the all-features build cannot reach.
 check-feature-matrix:
