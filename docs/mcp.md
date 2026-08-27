@@ -85,15 +85,29 @@ default, not for a deployment, and it is why the store is injectable.
 The adapter mints identity. It does not own persistence.
 
 ```rust
-trait ContinuationStore {
-    fn mint(&self, session: &SessionHandle, scope: Scope) -> ContinuationId;
-    fn resolve(&self, id: &ContinuationId, scope: Scope) -> Option<SessionHandle>;
+trait ContinuationStore: Send + Sync + 'static {
+    fn mint(&self, session: SessionHandle, scope: Scope)
+        -> StoreFuture<'_, Result<ContinuationId, ContinuationError>>;
+    fn resolve(&self, id: ContinuationId, scope: Scope)
+        -> StoreFuture<'_, Result<Option<SessionHandle>, ContinuationError>>;
+    fn forget_scope(&self, scope: Scope)
+        -> StoreFuture<'_, Result<(), ContinuationError>>;
 }
 ```
 
-The default implementation is in-memory and session-scoped. A durable host
-supplies its own, and in doing so chooses the lifetime and the scope check
-together.
+The operations return futures rather than values. This record first sketched
+them as synchronous, which would have forced every durable store into blocking
+I/O inside an async runtime, and sync to async is a breaking change once anyone
+implements the trait. The futures are boxed rather than written as `async fn`
+so the trait stays usable behind `dyn`, which is how a host supplies its own.
+
+`forget_scope` exists because a session-scoped store otherwise accumulates
+continuations that can never resolve again. A transport calls it when a session
+ends.
+
+The default implementation is in-memory, bounded, and does not survive a
+restart. A durable host supplies its own, and in doing so chooses the lifetime
+and the scope check together.
 
 This mirrors two decisions already made elsewhere in the workspace.
 `tower-agent-workflow` refuses to own persistence and moves an opaque host job
@@ -103,7 +117,10 @@ the store carries the mapping.
 
 `resolve` takes the scope rather than trusting the id, so a forged or leaked id
 from another scope fails to resolve rather than resolving into a stranger's
-conversation. Two further checks sit behind it and are not a substitute for it:
+conversation. It reports an unknown id, an id from another scope, and a dropped
+id identically as `Ok(None)`: distinguishing them would tell a caller that an
+identifier exists somewhere it cannot reach, which is an oracle rather than an
+error message. Two further checks sit behind it and are not a substitute for it:
 `ResumeBinding` in `tower-agent-plan` is provider-tagged, and the provider
 adapters already refuse a foreign-provider handle at validation.
 
@@ -176,7 +193,8 @@ that middleware survives the boundary.
 Unfiled. The intended order:
 
 1. `ContinuationStore`, the id type, and the scope check, with the session
-   boundary tested before any transport exists.
+   boundary tested before any transport exists. Implemented in
+   `crates/tower-agent-mcp`.
 2. The projection module, extracted from the composition test.
 3. `TurnTool`, including continuation input and continuation-on-failure.
 4. Progress events.
