@@ -8,6 +8,11 @@
 //! deliberately non-durable reference runner: it calls one host-supplied Tower
 //! service for each ready step and never retries a call.
 //!
+//! Mechanical work such as Git or GitHub operations is an ordinary host
+//! service behind the same dispatcher; this crate defines no mechanical trait
+//! and no subprocess runner. `docs/mechanical-steps.md` records that boundary
+//! and why running arbitrary commands is deferred rather than added.
+//!
 //! The job, workflow input, and step output are generic. An application can use
 //! a typed enum for heterogeneous agent and mechanical work, or an opaque job
 //! reference that a durable host resolves immediately before execution. This
