@@ -2,6 +2,7 @@ mod admission;
 mod authority;
 mod catch_panic;
 mod deadline;
+mod fault;
 mod limit;
 mod observe;
 mod supervise;
@@ -11,6 +12,7 @@ pub use admission::{Admission, AdmissionLayer};
 pub use authority::{AuthorityLayer, EnforceAuthority};
 pub use catch_panic::{CatchPanic, CatchPanicLayer};
 pub use deadline::{Deadline, DeadlineLayer};
+pub use fault::{Fault, FaultLayer, InjectFaults};
 pub use limit::{BoundedOutput, LimitOutput, LimitOutputLayer};
 pub use observe::{
     Observe, ObserveLayer, Receipt, ReceiptObserver, ReceiptSendError, ReceiptSink, ReceiptStatus,

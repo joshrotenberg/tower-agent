@@ -2865,3 +2865,62 @@ mod terminal_classification_tests {
         assert_ne!(error.kind, ErrorKind::InvalidRequest);
     }
 }
+
+#[cfg(test)]
+mod fault_injection_tests {
+    //! Proof that the core fault layer is reachable from an adapter crate's
+    //! own tests, which is the reason it lives in the public API.
+
+    use std::time::Duration;
+
+    use tower::{ServiceBuilder, ServiceExt};
+    use tower_agent::layer::{Fault, FaultLayer};
+    use tower_agent::{AgentRequest, EffectState, ErrorKind, Turn};
+
+    use super::{CodexOptions, CodexService};
+
+    /// A stalled provider is refused before any process exists, so this needs
+    /// no binary, no credentials, and no subprocess.
+    #[tokio::test]
+    async fn an_adapter_can_be_wrapped_without_a_real_provider() {
+        let service = ServiceBuilder::new()
+            .layer(FaultLayer::scripted([Fault::RefuseBeforeLaunch {
+                kind: ErrorKind::Unavailable,
+                message: "provider is down".to_string(),
+            }]))
+            .service(CodexService::new().with_binary("/definitely/not/a/codex/binary"));
+
+        let error = service
+            .oneshot(AgentRequest::new(
+                Turn::new("hello").with_options(CodexOptions::default()),
+            ))
+            .await
+            .expect_err("the fault refuses before launch");
+
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert_eq!(error.effects, EffectState::None);
+    }
+
+    /// A real adapter failure, held back so it settles late. The adapter is
+    /// genuinely invoked here: the binary does not exist, so it fails at
+    /// launch, and the layer delays that settlement.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_settling_adapter_failure_keeps_its_classification() {
+        let service = ServiceBuilder::new()
+            .layer(FaultLayer::scripted([Fault::DelaySettlement(
+                Duration::from_secs(5),
+            )]))
+            .service(CodexService::new().with_binary("/definitely/not/a/codex/binary"));
+
+        let error = service
+            .oneshot(AgentRequest::new(
+                Turn::new("hello").with_options(CodexOptions::default()),
+            ))
+            .await
+            .expect_err("the binary does not exist");
+
+        // Delaying settlement must not change what the adapter concluded.
+        assert_eq!(error.kind, ErrorKind::Provider);
+        assert_eq!(error.effects, EffectState::None);
+    }
+}
