@@ -21,6 +21,12 @@ tower.workspace = true
 [dev-dependencies]
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "test-util",
+] }
 tower-mcp = { workspace = true, features = ["testing"] }
 tower-resilience = { version = "0.12.0", features = ["bulkhead", "circuitbreaker", "ratelimiter"] }
