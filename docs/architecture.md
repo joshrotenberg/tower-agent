@@ -64,6 +64,26 @@ Events are observations, not the terminal response. Sinks are synchronous but
 must be nonblocking; a slow observer cannot hold provider execution hostage.
 Dropped observations are acceptable. Dropped terminal settlement is not.
 
+Counting events does not bound them. One event can carry an entire provider
+output, so a channel bounded at sixteen items is unbounded in bytes.
+`EventLimits` adds two ceilings: the largest single payload accepted, and the
+largest total retained by events emitted but not yet consumed. Because
+dropping an observation is acceptable, exceeding either drops the event and
+reports `Full` rather than failing the turn. The aggregate ceiling is a
+high-water mark, not a lifetime total: `BoundedEventReceiver` releases the
+budget as each event is taken.
+
+`LimitOutputLayer` bounds the terminal output instead, and there the opposite
+rule applies. An oversized result is refused, never truncated, because
+returning a partial value as success would misrepresent what the provider
+produced. The failure is typed `Limit`, carries no provider content, and keeps
+the accounting the turn established, since the turn ran and spent regardless
+of whether its output is usable.
+
+Neither ceiling bounds peak memory inside the provider wrappers, which read
+child output to EOF before the adapter sees it. That bound has to be added
+upstream.
+
 Receipts record operation identity and typed terminal state. Observation sits
 outside panic normalization so a panic converted into `AgentError` is visible
 as the actual terminal result.

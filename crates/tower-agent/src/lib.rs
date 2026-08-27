@@ -79,7 +79,9 @@ mod session;
 pub use authority::{AuthorityPolicy, FilesystemAuthority, RequestsFilesystemAuthority};
 pub use environment::{ChildEnvironmentError, ChildEnvironmentPolicy, ResolvedChildEnvironment};
 pub use error::{AgentError, EffectState, ErrorKind, FailurePhase};
-pub use event::{AgentEvent, EventObserver, EventSendError, EventSink};
+pub use event::{
+    AgentEvent, BoundedEventReceiver, EventLimits, EventObserver, EventSendError, EventSink,
+};
 pub use fake::{EchoService, FakeOptions, FakeService, FakeStep, FakeTerminal, NamedFakeService};
 pub use process::{SpawnObserver, SpawnReceipt};
 pub use request::{AgentRequest, CallContext, OperationId, Turn};
