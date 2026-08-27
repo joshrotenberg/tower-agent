@@ -27,7 +27,7 @@ tower-agent-plan = { path = "crates/tower-agent-plan" }
 
 anyhow = "1"
 claude-wrapper = "0.14"
-codex-wrapper = { version = "0.4.1", git = "https://github.com/joshrotenberg/codex-wrapper", rev = "3d72ed5e47b64dbcb78baa0f416c378349d03b0c" }
+codex-wrapper = "0.4.2"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 jsonschema = { version = "0.49", default-features = false }
