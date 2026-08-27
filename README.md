@@ -109,6 +109,11 @@ first and why `AgentRequest` is deliberately not `Clone`.
 
 ## Provider services
 
+The workspace targets Claude and Codex, deliberately: two adapters that are
+correct about cancellation, evidence, and bounded capture are worth more than
+several that are approximately right. Nothing in the kernel assumes two, and
+further providers are deferred rather than ruled out.
+
 `ClaudeService` and `CodexService` implement the same owned Tower contract with
 provider-specific option types. Both bridge request cancellation into the
 wrapper execution future. Their wrappers own a process group on Unix and kill

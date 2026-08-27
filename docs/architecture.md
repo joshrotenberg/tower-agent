@@ -185,6 +185,29 @@ effect but before terminal settlement or queue acknowledgement, so durable
 hosts must still assume at-least-once delivery and prevent automatic replay
 when effect state is possible.
 
+## Provider scope
+
+The workspace targets Claude and Codex, and is not seeking additional
+providers for now. The reason is depth over breadth: two adapters that are
+correct about cancellation, evidence, classification, and bounded capture are
+worth more than five that are approximately right, and every invariant here
+was found by pushing on those two rather than by adding a third.
+
+This is a scope decision, not a design limit. Nothing in the kernel assumes
+two providers: the concrete service identifies the provider, options stay in
+`Turn<O>`, and `ReadyTurn` is non-exhaustive precisely so another can be added
+without disturbing the pipeline. Proposals for further adapters are deferred
+rather than rejected, and carry `status/deferred` in the issue tracker.
+
+Two things follow from the decision and are worth stating so they are not
+rediscovered as gaps. Host-managed continuation for stateless providers stays
+unbuilt, because both current providers mint real sessions and designing that
+contract without a consumer would freeze a guess into the core. And shared
+process-lifecycle extraction stays undone, because the duplication two
+adapters show is not evidence about what a third would need; the terminal
+failures that were genuinely shared moved onto `AgentError`, and the rest is
+bound to distinct wrapper crates.
+
 ## Provider boundaries
 
 Provider controls are honor-or-refuse. A service either maps a requested model,
