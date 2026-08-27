@@ -222,10 +222,6 @@ pub fn plan(resolved: &ResolvedTurn) -> Result<Turn<ClaudeOptions>, Vec<Diagnost
     }
 
     let options_layer = partial.provider_options.claude.clone().unwrap_or_default();
-    let json_schema = options_layer
-        .json_schema
-        .map(|schema| serde_json::to_string(&schema).expect("a JSON value serializes"));
-
     let mut turn = Turn::new(resolved.prompt()).with_options(ClaudeOptions {
         system_prompt: options_layer.system_prompt,
         append_system_prompt: options_layer.append_system_prompt,
@@ -242,7 +238,7 @@ pub fn plan(resolved: &ResolvedTurn) -> Result<Turn<ClaudeOptions>, Vec<Diagnost
         max_turns: options_layer.max_turns,
         max_budget_usd: options_layer.max_budget_usd,
         permission_mode: options_layer.permission_mode.map(Into::into),
-        json_schema,
+        json_schema: options_layer.json_schema,
         strict_mcp_config: options_layer.strict_mcp_config.unwrap_or_default(),
         ambient_context: options_layer
             .ambient_context

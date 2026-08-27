@@ -60,6 +60,15 @@ impl Cost {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnOutcome {
     pub output: String,
+    /// The schema-constrained payload a provider validated, when one was
+    /// requested.
+    ///
+    /// This stays separate from `output` so a caller can revalidate the exact
+    /// value the provider produced rather than reparsing prose. It is `None`
+    /// whenever no structured output was requested; a turn that requested one
+    /// and did not receive it fails settlement instead of succeeding with an
+    /// absent payload.
+    pub structured: Option<serde_json::Value>,
     pub session: Option<SessionHandle>,
     pub usage: Option<TokenUsage>,
     pub cost: Option<Cost>,
@@ -106,6 +115,7 @@ impl TurnOutcome {
     pub fn new(output: impl Into<String>) -> Self {
         Self {
             output: output.into(),
+            structured: None,
             session: None,
             usage: None,
             cost: None,

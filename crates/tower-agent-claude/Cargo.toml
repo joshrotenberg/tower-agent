@@ -16,9 +16,10 @@ tower-agent.workspace = true
 tower.workspace = true
 
 claude-wrapper.workspace = true
+jsonschema.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

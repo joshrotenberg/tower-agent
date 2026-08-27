@@ -21,6 +21,7 @@
 //! remote turn cannot weaken. These are provider context controls rather than
 //! OS isolation; child environment and filesystem visibility remain separate.
 
+use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -39,8 +40,11 @@ use tower_agent::{
 
 const PROVIDER: &str = "claude";
 
+/// Maximum serialized size accepted for a Claude JSON schema.
+pub const MAX_JSON_SCHEMA_BYTES: usize = 1024 * 1024;
+
 /// Provider-specific controls for one Claude Code turn.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ClaudeOptions {
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
@@ -59,7 +63,11 @@ pub struct ClaudeOptions {
     /// representable here; this adapter does not expose that control.
     pub permission_mode: Option<ClaudePermissionMode>,
     /// JSON Schema the terminal result must validate against.
-    pub json_schema: Option<String>,
+    ///
+    /// The adapter validates this as draft-07, the dialect Claude Code
+    /// supports, bounds its serialized size, and requires an object, all
+    /// before launch. Option `Debug` redacts the schema.
+    pub json_schema: Option<serde_json::Value>,
     /// When true, the CLI ignores all configured MCP servers (user scope
     /// and any project .mcp.json at the working directory) and boots none.
     /// Hosts that queue turns from inside a project directory want this:
@@ -69,6 +77,33 @@ pub struct ClaudeOptions {
     /// Requested ambient-context mode. The service's host-owned baseline is
     /// always applied and cannot be weakened by a turn.
     pub ambient_context: ClaudeAmbientContext,
+}
+
+impl fmt::Debug for ClaudeOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClaudeOptions")
+            .field("system_prompt", &self.system_prompt)
+            .field("append_system_prompt", &self.append_system_prompt)
+            .field("model", &self.model)
+            .field("fallback_model", &self.fallback_model)
+            .field("effort", &self.effort)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("disallowed_tools", &self.disallowed_tools)
+            .field("additional_directories", &self.additional_directories)
+            .field("max_turns", &self.max_turns)
+            .field("max_budget_usd", &self.max_budget_usd)
+            .field("permission_mode", &self.permission_mode)
+            // A schema describes the caller's private data shape, and the
+            // Codex adapter redacts its own for the same reason.
+            .field(
+                "json_schema",
+                &self.json_schema.as_ref().map(|_| "<redacted>"),
+            )
+            .field("strict_mcp_config", &self.strict_mcp_config)
+            .field("ambient_context", &self.ambient_context)
+            .finish()
+    }
 }
 
 /// Mutually exclusive Claude ambient-context modes.
@@ -401,6 +436,7 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
             .as_ref()
             .map(|session| session.value().to_string());
 
+        let schema_requested = request.body.options.json_schema.is_some();
         Box::pin(run(
             claude,
             query,
@@ -408,6 +444,7 @@ impl Service<AgentRequest<Turn<ClaudeOptions>>> for ClaudeService {
             cancellation,
             prior_session,
             preassigned_session,
+            schema_requested,
         ))
     }
 }
@@ -470,6 +507,40 @@ fn preflight_session(turn: &Turn<ClaudeOptions>) -> Result<(), AgentError> {
         }
     }
     Ok(())
+}
+
+/// Validate a Claude JSON schema before launch and return its encoding.
+///
+/// Claude Code documents structured outputs as JSON Schema draft-07 and
+/// rejects an invalid schema at startup. Left to the CLI, that rejection
+/// arrives as a running, possibly-effectful failure for what is a pure
+/// configuration error, so the same checks happen here instead. Errors never
+/// include schema content.
+fn validate_json_schema(schema: &serde_json::Value) -> Result<String, AgentError> {
+    if !schema.is_object() {
+        return Err(AgentError::invalid_request(
+            "Claude JSON schema must be an object",
+        ));
+    }
+    let encoded = serde_json::to_string(schema).map_err(|_| {
+        AgentError::new(
+            ErrorKind::Internal,
+            "Claude JSON schema could not be serialized",
+            FailurePhase::Validation,
+            EffectState::None,
+        )
+    })?;
+    if encoded.len() > MAX_JSON_SCHEMA_BYTES {
+        return Err(AgentError::invalid_request(format!(
+            "Claude JSON schema exceeds the {MAX_JSON_SCHEMA_BYTES}-byte limit"
+        )));
+    }
+    if !jsonschema::draft7::meta::is_valid(schema) {
+        return Err(AgentError::invalid_request(
+            "Claude JSON schema is not valid JSON Schema draft-07",
+        ));
+    }
+    Ok(encoded)
 }
 
 fn effective_ambient_context(
@@ -541,15 +612,11 @@ fn build_query(
             "Claude fallback model must not be empty",
         ));
     }
-    if options
+    let json_schema = options
         .json_schema
         .as_ref()
-        .is_some_and(|schema| schema.trim().is_empty())
-    {
-        return Err(AgentError::invalid_request(
-            "Claude JSON schema must not be empty",
-        ));
-    }
+        .map(validate_json_schema)
+        .transpose()?;
 
     let mut command = QueryCommand::new(turn.prompt.clone());
     if let Some(prompt) = &options.system_prompt {
@@ -573,7 +640,7 @@ fn build_query(
     if let Some(mode) = options.permission_mode {
         command = command.permission_mode(mode.into());
     }
-    if let Some(schema) = &options.json_schema {
+    if let Some(schema) = &json_schema {
         command = command.json_schema(schema);
     }
     if let Some(session) = &turn.session {
@@ -620,6 +687,7 @@ async fn run(
     cancellation: tower_agent::CancellationToken,
     prior_session: Option<String>,
     preassigned_session: Option<SessionHandle>,
+    schema_requested: bool,
 ) -> Result<TurnOutcome, AgentError> {
     if cancellation.is_cancelled() {
         return Err(attach_preassigned_session(
@@ -651,10 +719,16 @@ async fn run(
         return Err(map_query_error(&result, preassigned_session.as_ref()));
     }
 
+    let structured = match structured_output(&result, schema_requested) {
+        Ok(structured) => structured,
+        Err(error) => return Err(error.with_evidence(query_evidence_without_session(&result))),
+    };
+
     let _ = observer.try_emit(AgentEvent::OutputDelta {
         text: result.result.clone(),
     });
     let mut outcome = TurnOutcome::new(result.result);
+    outcome.structured = structured;
     outcome.session = preassigned_session.or_else(|| {
         (!result.session_id.is_empty())
             .then_some(result.session_id)
@@ -670,6 +744,34 @@ async fn run(
     outcome.duration = result.duration_ms.map(Duration::from_millis);
     outcome.provider_turns = result.num_turns;
     Ok(outcome)
+}
+
+/// Take the schema-constrained payload Claude validated.
+///
+/// Anthropic documents a structured-output success as requiring both a
+/// successful result and a present `structured_output`, so a turn that asked
+/// for one and did not receive it fails settlement rather than succeeding
+/// with the prose alone.
+fn structured_output(
+    result: &QueryResult,
+    schema_requested: bool,
+) -> Result<Option<serde_json::Value>, AgentError> {
+    let payload = result
+        .extra
+        .get("structured_output")
+        .filter(|value| !value.is_null())
+        .cloned();
+    match (schema_requested, payload) {
+        (true, None) => Err(AgentError::new(
+            ErrorKind::Provider,
+            "Claude reported success without the requested structured output",
+            FailurePhase::Settlement,
+            EffectState::Possible,
+        )),
+        (true, payload) => Ok(payload),
+        // Without a request the field is provider extra data, not a contract.
+        (false, _) => Ok(None),
+    }
 }
 
 fn map_usage(usage: &claude_wrapper::TokenUsage) -> TokenUsage {
@@ -1137,7 +1239,7 @@ mod tests {
             max_turns: Some(4),
             max_budget_usd: Some(2.5),
             permission_mode: Some(ClaudePermissionMode::Plan),
-            json_schema: Some(r#"{"type":"object"}"#.into()),
+            json_schema: Some(serde_json::json!({"type": "object"})),
             strict_mcp_config: true,
             ambient_context: ClaudeAmbientContext::Hermetic(ClaudeHermetic::Full),
         };
@@ -1185,7 +1287,7 @@ mod tests {
                 ..ClaudeOptions::default()
             },
             ClaudeOptions {
-                json_schema: Some("   ".into()),
+                json_schema: Some(serde_json::json!("not an object")),
                 ..ClaudeOptions::default()
             },
             ClaudeOptions {
@@ -1812,7 +1914,7 @@ mod preflight_parity_tests {
                 ..ClaudeOptions::default()
             }),
             Turn::new("hello").with_options(ClaudeOptions {
-                json_schema: Some("  ".to_string()),
+                json_schema: Some(serde_json::json!([1, 2, 3])),
                 ..ClaudeOptions::default()
             }),
         ]
@@ -1851,5 +1953,199 @@ mod preflight_parity_tests {
         let service = ClaudeService::new().with_binary("/nonexistent/claude-binary");
         let turn = Turn::new("hello").with_options(ClaudeOptions::default());
         assert!(service.preflight(&turn).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod structured_output_tests {
+    use tower::ServiceExt;
+    use tower_agent::{AgentRequest, EffectState, ErrorKind, FailurePhase, Turn};
+
+    use super::{ClaudeOptions, ClaudeService, MAX_JSON_SCHEMA_BYTES};
+
+    const SCHEMA_SENTINEL: &str = "host-private-schema-marker";
+
+    fn options(schema: serde_json::Value) -> ClaudeOptions {
+        ClaudeOptions {
+            json_schema: Some(schema),
+            ..ClaudeOptions::default()
+        }
+    }
+
+    /// A service whose binary cannot exist, so any error proves the failure
+    /// happened before launch.
+    fn service() -> ClaudeService {
+        ClaudeService::new().with_binary("/definitely/not/a/claude/binary")
+    }
+
+    #[tokio::test]
+    async fn invalid_schemas_fail_before_launch_without_disclosing_content() {
+        let oversized = serde_json::json!({
+            "type": "object",
+            "description": "x".repeat(MAX_JSON_SCHEMA_BYTES),
+            "marker": SCHEMA_SENTINEL,
+        });
+        let cases = [
+            serde_json::json!("not an object"),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({ "type": 42, "marker": SCHEMA_SENTINEL }),
+            oversized,
+        ];
+
+        for schema in cases {
+            let turn = Turn::new("hello").with_options(options(schema));
+            let preflight = service().preflight(&turn).expect_err("preflight refuses");
+            let call = service()
+                .oneshot(AgentRequest::new(turn))
+                .await
+                .expect_err("call refuses");
+
+            assert_eq!(preflight, call);
+            assert_eq!(call.kind, ErrorKind::InvalidRequest);
+            assert_eq!(call.phase, FailurePhase::Validation);
+            assert_eq!(call.effects, EffectState::None);
+            assert!(call.evidence.is_none(), "no evidence for a config error");
+            assert!(!call.message.contains(SCHEMA_SENTINEL), "{}", call.message);
+            assert!(!format!("{call:?}").contains(SCHEMA_SENTINEL));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_draft7_schema_passes_preflight() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "verdict": { "type": "string" } },
+            "required": ["verdict"],
+            "additionalProperties": false,
+        });
+        let turn = Turn::new("hello").with_options(options(schema));
+        assert!(service().preflight(&turn).is_ok());
+    }
+
+    #[test]
+    fn options_debug_redacts_the_schema() {
+        let rendered = format!(
+            "{:?}",
+            options(serde_json::json!({ "marker": SCHEMA_SENTINEL }))
+        );
+        assert!(!rendered.contains(SCHEMA_SENTINEL), "{rendered}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod structured_result_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use tower::ServiceExt;
+    use tower_agent::{AgentRequest, EffectState, ErrorKind, FailurePhase, SessionHandle, Turn};
+
+    use super::{ClaudeOptions, ClaudeService};
+
+    /// A fake CLI that varies its result line by prompt.
+    fn scripted_service(name: &str) -> (ClaudeService, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "tower-agent-claude-structured-{}-{}.sh",
+            name,
+            std::process::id()
+        ));
+        let script = concat!(
+            "#!/bin/sh\n",
+            "prompt=$(cat)\n",
+            "if [ \"$prompt\" = with_payload ]; then\n",
+            "  printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"prose\",\"structured_output\":{\"verdict\":\"ship\",\"score\":7},\"session_id\":\"s-1\",\"is_error\":false}'\n",
+            "elif [ \"$prompt\" = null_payload ]; then\n",
+            "  printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"prose\",\"structured_output\":null,\"session_id\":\"s-1\",\"total_cost_usd\":0.25,\"is_error\":false}'\n",
+            "else\n",
+            "  printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"prose\",\"session_id\":\"s-1\",\"total_cost_usd\":0.25,\"is_error\":false}'\n",
+            "fi\n",
+        );
+        std::fs::write(&path, script).expect("write fake Claude CLI");
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        (ClaudeService::new().with_binary(&path), path)
+    }
+
+    fn schema_options() -> ClaudeOptions {
+        ClaudeOptions {
+            json_schema: Some(serde_json::json!({ "type": "object" })),
+            ..ClaudeOptions::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_requested_payload_is_returned_exactly() {
+        let (service, path) = scripted_service("payload");
+        let outcome = service
+            .oneshot(AgentRequest::new(
+                Turn::new("with_payload").with_options(schema_options()),
+            ))
+            .await
+            .expect("structured turn succeeds");
+
+        assert_eq!(
+            outcome.structured,
+            Some(serde_json::json!({ "verdict": "ship", "score": 7 }))
+        );
+        // Prose stays separate from the validated value.
+        assert_eq!(outcome.output, "prose");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_turn_carries_its_payload_too() {
+        let (service, path) = scripted_service("resume");
+        let outcome = service
+            .oneshot(AgentRequest::new(
+                Turn::new("with_payload")
+                    .with_options(schema_options())
+                    .resume(SessionHandle::new("claude", "prior")),
+            ))
+            .await
+            .expect("resumed structured turn succeeds");
+
+        assert_eq!(
+            outcome.structured,
+            Some(serde_json::json!({ "verdict": "ship", "score": 7 }))
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_null_payload_fails_settlement_with_accounting_evidence() {
+        for prompt in ["absent_payload", "null_payload"] {
+            let (service, path) = scripted_service(prompt);
+            let error = service
+                .oneshot(AgentRequest::new(
+                    Turn::new(prompt).with_options(schema_options()),
+                ))
+                .await
+                .expect_err("a requested payload that never arrived is not a success");
+
+            assert_eq!(error.kind, ErrorKind::Provider);
+            assert_eq!(error.phase, FailurePhase::Settlement);
+            assert_eq!(error.effects, EffectState::Possible);
+            // Accounting survives; the session does not, since the turn did
+            // not deliver what it promised.
+            let evidence = error.evidence.as_deref().expect("accounting evidence");
+            assert_eq!(evidence.cost.as_ref().map(|cost| cost.amount), Some(0.25));
+            assert!(evidence.session.is_none());
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_a_schema_ignores_provider_extra_data() {
+        let (service, path) = scripted_service("noschema");
+        let outcome = service
+            .oneshot(AgentRequest::new(
+                Turn::new("with_payload").with_options(ClaudeOptions::default()),
+            ))
+            .await
+            .expect("unstructured turn succeeds");
+
+        assert_eq!(outcome.structured, None);
+        assert_eq!(outcome.output, "prose");
+        let _ = std::fs::remove_file(path);
     }
 }
