@@ -233,15 +233,48 @@ Unfiled. The intended order:
    composition test now lives.
 4. Progress events. Implemented in `crates/tower-agent-mcp`.
 5. `PlanTool` behind a feature, once the turn projection is stable.
+   Implemented in `crates/tower-agent-mcp` behind `plan`.
 
 `PlanTool` is deliberately last. The adapter's first version should not depend
 on `tower-agent-plan`, so that the planning crate gains a consumer without the
 interface inheriting a second crate's API surface before its own is settled.
 
+## Settled during implementation
+
+**Planning belongs at the surface, narrowly.** Elicitation is an MCP capability
+and requirements are already structured data, so rendering one as the other is
+a projection rather than a translation. What does not belong is the planning
+vocabulary itself: `PlanTool` accepts a small adapter-owned input and not a
+`PartialTurn`. Publishing the latter would make an MCP schema out of a type the
+planning crate owns and evolves, and would commit this adapter to mirroring it.
+Defaults, profiles, and provider baselines stay on the host, where the layering
+already put them, and the client supplies only the explicit layer.
+
+**Two tools, not one with a mode.** They differ in what they require rather
+than in what they do. `TurnTool` takes a complete turn and never talks back to
+the client; `PlanTool` takes a fragment and may. Collapsing them would give one
+tool an input where half the fields are conditional on the others, and would
+put an interactive round trip behind a schema that does not say so.
+
+A `ValueKind::Provider` requirement renders as a single-select enum rather than
+free text, so a client cannot answer with a provider no planner accepts. Hosts
+narrow the offered set to what they registered.
+
+Elicitation rounds are bounded, and a round that binds nothing ends the plan
+rather than repeating. Declining or cancelling refuses the turn: running with
+host defaults anyway would ignore an answer the user gave, and nothing has
+launched, so refusing costs nothing.
+
+A requirement marked `sensitive` is refused rather than elicited. The shared
+resolver never emits one today, so this is defensive: provider planners may add
+provider-conditional requirements, and a planner marking one sensitive is
+telling this adapter not to put the value in a form.
+
 ## Open
 
-- Whether planning belongs at the MCP surface at all, or whether elicitation is
-  a host concern and the adapter stays a thin turn projection.
-- Whether one tool with a mode or two tools is the better public shape.
 - Whether the adapter ships an authenticated store or only the trait, which
   depends on how `tower-mcp` auth is configured in practice.
+- Whether `PlanTool`'s input should grow beyond prompt, provider, and
+  continuation. Every addition is a permanent wire commitment, so each one
+  should be driven by a host that needs it rather than by symmetry with
+  `PartialTurn`.

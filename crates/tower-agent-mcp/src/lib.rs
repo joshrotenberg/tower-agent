@@ -48,6 +48,8 @@
 #![deny(missing_docs)]
 
 mod continuation;
+#[cfg(feature = "plan")]
+mod plan;
 mod progress;
 mod projection;
 mod tool;
@@ -56,6 +58,8 @@ pub use continuation::{
     ContinuationError, ContinuationId, ContinuationStore, DEFAULT_CAPACITY,
     InMemoryContinuationStore, InvalidContinuationId, Scope, StoreFuture,
 };
+#[cfg(feature = "plan")]
+pub use plan::{DEFAULT_MAX_ELICITATION_ROUNDS, PlanTool};
 pub use progress::ProgressEvents;
 pub use projection::{Projection, ProviderMessages};
 pub use tool::{FixedScope, ScopeSource, ScopeUnavailable, TurnTool};
