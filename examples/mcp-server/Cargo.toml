@@ -1,0 +1,30 @@
+[package]
+name = "mcp-server-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "mcp_server_example"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-mcp"
+path = "src/main.rs"
+
+[dependencies]
+tower-agent.workspace = true
+tower-agent-claude.workspace = true
+tower-agent-codex.workspace = true
+tower-agent-mcp = { workspace = true, features = ["plan-claude", "plan-codex"] }
+tower-agent-plan = { workspace = true, features = ["claude", "codex"] }
+
+anyhow.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-mcp.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tower-agent-mcp = { workspace = true, features = ["plan-claude", "plan-codex"] }

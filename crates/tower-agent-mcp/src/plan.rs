@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tower::{Service, ServiceExt};
@@ -53,6 +54,7 @@ struct PlanToolState<S> {
     defaults: PartialTurn,
     providers: Vec<ProviderId>,
     max_rounds: usize,
+    timeout: Option<Duration>,
 }
 
 impl<S: Clone> Clone for PlanToolState<S> {
@@ -65,6 +67,7 @@ impl<S: Clone> Clone for PlanToolState<S> {
             defaults: self.defaults.clone(),
             providers: self.providers.clone(),
             max_rounds: self.max_rounds,
+            timeout: self.timeout,
         }
     }
 }
@@ -118,6 +121,7 @@ where
                 defaults: PartialTurn::default(),
                 providers: vec![ProviderId::Claude, ProviderId::Codex],
                 max_rounds: DEFAULT_MAX_ELICITATION_ROUNDS,
+                timeout: None,
             },
             name: "plan".to_string(),
             description: "Plan and run one agent turn, asking for anything missing".to_string(),
@@ -154,6 +158,17 @@ where
     #[must_use]
     pub fn with_max_elicitation_rounds(mut self, rounds: usize) -> Self {
         self.state.max_rounds = rounds;
+        self
+    }
+
+    /// Give the compiled turn a deadline, measured from when it is admitted.
+    ///
+    /// Timed from after elicitation, not before. A client taking its time to
+    /// answer a form is not the turn running long, and charging it against the
+    /// turn's budget would refuse work that had not started.
+    #[must_use]
+    pub fn with_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.state.timeout = Some(timeout);
         self
     }
 
@@ -397,9 +412,12 @@ where
     let cancellation = CancellationToken::new();
     let progress = ProgressEvents::new(context.clone().into_inner())
         .with_provider_messages(state.projection.provider_messages());
-    let call = CallContext::new()
+    let mut call = CallContext::new()
         .with_cancellation(cancellation.clone())
         .with_events(EventObserver::new(progress));
+    if let Some(timeout) = state.timeout {
+        call = call.with_deadline(Instant::now() + timeout);
+    }
     let operation_id = call.operation_id();
 
     let result = crate::tool::run_until_settled(

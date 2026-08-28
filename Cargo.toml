@@ -10,6 +10,7 @@ members = [
     "examples/agent",
     "examples/repository-worker",
     "examples/apalis-durable",
+    "examples/mcp-server",
     "examples/apalis-local",
 ]
 

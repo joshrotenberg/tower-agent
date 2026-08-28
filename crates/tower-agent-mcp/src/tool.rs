@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tower::ServiceExt;
@@ -88,6 +89,7 @@ struct TurnToolState {
     store: Arc<dyn ContinuationStore>,
     scopes: Arc<dyn ScopeSource>,
     projection: Projection,
+    timeout: Option<Duration>,
 }
 
 /// One finite agent turn, exposed as an MCP tool.
@@ -120,6 +122,7 @@ impl TurnTool {
                 store,
                 scopes,
                 projection: Projection::new(),
+                timeout: None,
             },
             name: "prompt".to_string(),
             description: "Run one finite agent turn".to_string(),
@@ -130,6 +133,21 @@ impl TurnTool {
     #[must_use]
     pub fn with_projection(mut self, projection: Projection) -> Self {
         self.state.projection = projection;
+        self
+    }
+
+    /// Give every turn a deadline measured from when it is admitted.
+    ///
+    /// Without one the request context carries no deadline, and a
+    /// `DeadlineLayer` in the service has nothing to enforce. A protocol
+    /// surface generally wants this: a client can cancel, but nothing obliges
+    /// it to, and a turn with no deadline and no client is a turn that runs
+    /// until the provider decides otherwise.
+    ///
+    /// Enforcement still belongs to the layer. This only sets the constraint.
+    #[must_use]
+    pub fn with_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.state.timeout = Some(timeout);
         self
     }
 
@@ -195,9 +213,12 @@ async fn run(state: TurnToolState, context: Context, input: TurnInput) -> CallTo
     // splitting the two policies would let text out through the other door.
     let progress = ProgressEvents::new(context.clone().into_inner())
         .with_provider_messages(state.projection.provider_messages());
-    let call = CallContext::new()
+    let mut call = CallContext::new()
         .with_cancellation(cancellation.clone())
         .with_events(EventObserver::new(progress));
+    if let Some(timeout) = state.timeout {
+        call = call.with_deadline(Instant::now() + timeout);
+    }
     let operation_id = call.operation_id();
     let result = run_until_settled(
         state
