@@ -23,6 +23,7 @@ check-examples:
     cargo run -q -p tower-agent --all-features --locked --example health_gated_circuit
     cargo run -q -p tower-agent --all-features --locked --example rate_limiter
     cargo run -q -p tower-agent-plan --features claude --locked --example elicitation_loop
+    cargo run -q -p tower-agent-mcp --locked --example stdio_server
 
 # Lint the provider-feature combinations the all-features build cannot reach.
 check-feature-matrix:

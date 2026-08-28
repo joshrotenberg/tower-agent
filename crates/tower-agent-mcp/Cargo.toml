@@ -13,10 +13,15 @@ description = "MCP adapter vocabulary for tower-agent, including public continua
 publish = false
 
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+tower.workspace = true
 tower-agent.workspace = true
+tower-mcp.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tower-mcp = { workspace = true, features = ["testing"] }

@@ -49,9 +49,11 @@
 
 mod continuation;
 mod projection;
+mod tool;
 
 pub use continuation::{
     ContinuationError, ContinuationId, ContinuationStore, DEFAULT_CAPACITY,
     InMemoryContinuationStore, InvalidContinuationId, Scope, StoreFuture,
 };
 pub use projection::{Projection, ProviderMessages};
+pub use tool::{FixedScope, ScopeSource, ScopeUnavailable, TurnTool};

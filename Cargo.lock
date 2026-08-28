@@ -1506,7 +1506,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
- "tower-mcp",
  "tower-resilience",
 ]
 
@@ -1540,10 +1539,13 @@ dependencies = [
 name = "tower-agent-mcp"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tower",
  "tower-agent",
+ "tower-mcp",
  "uuid",
 ]
 
