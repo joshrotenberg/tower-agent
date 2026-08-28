@@ -47,6 +47,12 @@ cargo run -p tower-agent-plan --features claude --example elicitation_loop
 
 ## Status
 
-Unpublished workspace crate. The vocabulary and merge laws are specified by
-the JSON fixture corpus under `tests/fixtures/`; the provider folds are
-specified by the typed planner tests.
+Experimental, at `0.1`, alongside the rest of the workspace. API stability is
+not yet a goal.
+
+The vocabulary and merge laws are specified by the JSON fixture corpus under
+`tests/fixtures/`; the provider folds are specified by the typed planner tests.
+
+Provider support is feature-gated. With neither `claude` nor `codex` enabled
+the crate still resolves and reports requirements; it just has no planner to
+compile a turn with.

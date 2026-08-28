@@ -74,9 +74,11 @@ vocabulary. `plan-claude` and `plan-codex` forward to the planner features.
 
 ## Status
 
-Unpublished workspace crate. The record is implemented: the continuation store,
-the projection, the turn tool, progress reporting, and a planning tool behind
-the `plan` feature.
+Experimental, at `0.1`, alongside the rest of the workspace. API stability is
+not yet a goal.
+
+The record is implemented: the continuation store, the projection, the turn
+tool, progress reporting, and a planning tool behind the `plan` feature.
 
 Progress indicates liveness, not content, and obeys the projection's redaction
 policy rather than its own, because a notification reaches the same client the
