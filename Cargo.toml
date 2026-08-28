@@ -4,6 +4,7 @@ members = [
     "crates/tower-agent",
     "crates/tower-agent-claude",
     "crates/tower-agent-codex",
+    "crates/tower-agent-mcp",
     "crates/tower-agent-plan",
     "crates/tower-agent-workflow",
     "examples/agent",
@@ -27,6 +28,7 @@ categories = ["asynchronous", "development-tools"]
 tower-agent = { path = "crates/tower-agent", version = "0.1.0" }
 tower-agent-claude = { path = "crates/tower-agent-claude", version = "0.1.0" }
 tower-agent-codex = { path = "crates/tower-agent-codex", version = "0.1.0" }
+tower-agent-mcp = { path = "crates/tower-agent-mcp" }
 tower-agent-plan = { path = "crates/tower-agent-plan" }
 tower-agent-workflow = { path = "crates/tower-agent-workflow" }
 

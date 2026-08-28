@@ -55,3 +55,7 @@ release = false
 [[package]]
 name = "apalis-durable-example"
 release = false
+
+[[package]]
+name = "tower-agent-mcp"
+release = false
