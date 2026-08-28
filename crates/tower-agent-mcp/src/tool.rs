@@ -170,7 +170,7 @@ async fn run(state: TurnToolState, context: Context, input: TurnInput) -> CallTo
         // No scope means no safe way to name or resolve a continuation, so the
         // turn is refused rather than run without one.
         Err(unavailable) => {
-            return refuse(
+            return refuse_with(
                 &state.projection,
                 AgentError::invalid_request(unavailable.to_string()),
             );
@@ -179,7 +179,7 @@ async fn run(state: TurnToolState, context: Context, input: TurnInput) -> CallTo
 
     let resumed = match resolve_continuation(&state, input.continuation.as_deref(), &scope).await {
         Ok(session) => session,
-        Err(error) => return refuse(&state.projection, error),
+        Err(error) => return refuse_with(&state.projection, error),
     };
 
     let mut turn = Turn::new(input.prompt);
@@ -276,12 +276,14 @@ async fn resolve_continuation(
 
 /// Forward an MCP cancellation into the turn, then wait for it to settle.
 ///
+/// Shared with the planning tool, which runs a compiled turn the same way.
+///
 /// Cancelling signals and drains. The provider future is never dropped, so the
 /// terminal result and its evidence still arrive, which is the same guarantee
 /// `DeadlineLayer` gives. The cancellation branch is disabled after it fires
 /// because an already-cancelled token completes immediately and would
 /// otherwise spin.
-async fn run_until_settled<F, T>(
+pub(crate) async fn run_until_settled<F, T>(
     future: F,
     incoming: tower_mcp::context::CancellationToken,
     outgoing: CancellationToken,
@@ -318,7 +320,7 @@ async fn mint(
 }
 
 /// A refusal that never reached the provider.
-fn refuse(projection: &Projection, error: AgentError) -> CallToolResult {
+pub(crate) fn refuse_with(projection: &Projection, error: AgentError) -> CallToolResult {
     let structured = projection.failure(&error, CallContext::new().operation_id(), None);
     let mut response = CallToolResult::error(projection.message(&error));
     response.structured_content = Some(structured);

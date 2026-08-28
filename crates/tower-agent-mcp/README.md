@@ -57,11 +57,26 @@ projection reports a session that is present with no continuation.
 cargo run -p tower-agent-mcp --example stdio_server
 ```
 
+## Planning, behind the `plan` feature
+
+`PlanTool` accepts a fragment instead of a complete turn, resolves it against
+host defaults, and asks the client for whatever is still unbound. Requirements
+are already structured data, so the elicitation form is a rendering of them
+rather than a translation. A provider requirement becomes a single-select
+field, so a client cannot choose one no planner accepts.
+
+The input is a small adapter-owned shape, not a `PartialTurn`. Defaults,
+profiles, and provider baselines stay on the host, which is where the planning
+crate's layering already put them.
+
+Off by default, so the adapter's own surface does not depend on the planning
+vocabulary. `plan-claude` and `plan-codex` forward to the planner features.
+
 ## Status
 
-Unpublished workspace crate, through step four of the record: the continuation
-store, the projection, the turn tool, and progress reporting. A planning tool
-behind a feature is the remaining step.
+Unpublished workspace crate. The record is implemented: the continuation store,
+the projection, the turn tool, progress reporting, and a planning tool behind
+the `plan` feature.
 
 Progress indicates liveness, not content, and obeys the projection's redaction
 policy rather than its own, because a notification reaches the same client the

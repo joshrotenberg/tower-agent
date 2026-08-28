@@ -30,6 +30,10 @@ check-feature-matrix:
     cargo clippy -p tower-agent-plan --all-targets --locked -- -D warnings
     cargo clippy -p tower-agent-plan --all-targets --locked --features claude -- -D warnings
     cargo clippy -p tower-agent-plan --all-targets --locked --features codex -- -D warnings
+    cargo clippy -p tower-agent-mcp --all-targets --locked -- -D warnings
+    cargo clippy -p tower-agent-mcp --all-targets --locked --features plan -- -D warnings
+    cargo clippy -p tower-agent-mcp --all-targets --locked --features plan-claude -- -D warnings
+    cargo clippy -p tower-agent-mcp --all-targets --locked --features plan-codex -- -D warnings
 
 fmt:
     cargo fmt --all

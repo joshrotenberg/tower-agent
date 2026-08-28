@@ -19,9 +19,18 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tower.workspace = true
 tower-agent.workspace = true
+tower-agent-plan = { workspace = true, optional = true }
 tower-mcp.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tower-mcp = { workspace = true, features = ["testing"] }
+
+[features]
+# Planning at the MCP surface: elicit what a partial turn is missing, then run
+# it. Off by default so the adapter's own surface does not depend on the
+# planning vocabulary.
+plan = ["dep:tower-agent-plan"]
+plan-claude = ["plan", "tower-agent-plan/claude"]
+plan-codex = ["plan", "tower-agent-plan/codex"]
