@@ -4,9 +4,10 @@
 //! execution policy is composed into the service before it gets here, and the
 //! tool does not change it.
 //!
-//! Progress reporting is not wired yet. `AgentEvent` maps onto MCP progress
-//! notifications and that is the next step of `docs/mcp.md`; until then a turn
-//! reports only its terminal result.
+//! A turn's events are reported as MCP progress when the client asks for them
+//! by sending a progress token. Progress indicates liveness rather than
+//! carrying content, and it follows the same redaction policy as the terminal
+//! result, because both reach the same client.
 //!
 //! Run with `cargo run -p tower-agent-mcp --example stdio_server`.
 

@@ -48,6 +48,7 @@
 #![deny(missing_docs)]
 
 mod continuation;
+mod progress;
 mod projection;
 mod tool;
 
@@ -55,5 +56,6 @@ pub use continuation::{
     ContinuationError, ContinuationId, ContinuationStore, DEFAULT_CAPACITY,
     InMemoryContinuationStore, InvalidContinuationId, Scope, StoreFuture,
 };
+pub use progress::ProgressEvents;
 pub use projection::{Projection, ProviderMessages};
 pub use tool::{FixedScope, ScopeSource, ScopeUnavailable, TurnTool};

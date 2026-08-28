@@ -181,6 +181,22 @@ already-cancelled token completes immediately and would otherwise spin.
 rather than stall the call they observe, so an `EventSink` wrapping `Context`
 preserves the rule that observation never delays settlement.
 
+Two things about that mapping are decisions rather than consequences.
+
+Progress indicates liveness and does not carry content. The progress value
+counts observations, and `total` is always absent because an agent turn has no
+known total. Streaming output through progress would be using a progress
+indicator as a content channel, and the terminal result already carries the
+output.
+
+Progress obeys the same redaction policy as the projection rather than its own.
+A progress notification reaches the same client the result does, so a separate
+policy would be a second door out of the first one. Under the redacted default
+a message names what kind of thing happened and not what it said, which keeps
+provider-authored status and warning text unpublished. Numbers are exempt: a
+turn counter and a token total are the provider's own accounting rather than
+text it wrote, and they are the part a progress indicator needs.
+
 **Elicitation is what requirements were shaped for.** `Context::elicit_form`
 takes what `Requirement` already carries, and `ElicitResult` becomes `Answer`.
 `tower-agent-plan` documents this use case explicitly and has had no consumer
@@ -215,7 +231,7 @@ Unfiled. The intended order:
 3. `TurnTool`, including continuation input and continuation-on-failure.
    Implemented in `crates/tower-agent-mcp`, which is also where the
    composition test now lives.
-4. Progress events.
+4. Progress events. Implemented in `crates/tower-agent-mcp`.
 5. `PlanTool` behind a feature, once the turn projection is stable.
 
 `PlanTool` is deliberately last. The adapter's first version should not depend

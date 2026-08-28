@@ -4,12 +4,12 @@ use serde::Deserialize;
 use tower::ServiceExt;
 use tower_agent::{
     AgentError, AgentRequest, BoxTurnService, CallContext, CancellationToken, EffectState,
-    ErrorKind, FailurePhase, SessionHandle, Turn,
+    ErrorKind, EventObserver, FailurePhase, SessionHandle, Turn,
 };
 use tower_mcp::extract::{Context, Json, State};
 use tower_mcp::{CallToolResult, Error, RequestContext, Tool, ToolBuilder};
 
-use crate::{ContinuationId, ContinuationStore, Projection, Scope};
+use crate::{ContinuationId, ContinuationStore, ProgressEvents, Projection, Scope};
 
 /// Why a request could not be given a continuation scope.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -190,7 +190,14 @@ async fn run(state: TurnToolState, context: Context, input: TurnInput) -> CallTo
     // `tower_mcp::CancellationToken` wraps a `tokio_util` token but keeps it
     // private, so the two cannot be shared and a bridge is required.
     let cancellation = CancellationToken::new();
-    let call = CallContext::new().with_cancellation(cancellation.clone());
+    // Observation follows the same redaction policy as the terminal result.
+    // A progress notification reaches the same client the projection does, so
+    // splitting the two policies would let text out through the other door.
+    let progress = ProgressEvents::new(context.clone().into_inner())
+        .with_provider_messages(state.projection.provider_messages());
+    let call = CallContext::new()
+        .with_cancellation(cancellation.clone())
+        .with_events(EventObserver::new(progress));
     let operation_id = call.operation_id();
     let result = run_until_settled(
         state
