@@ -1,3 +1,14 @@
+//! Proves an MCP surface is a thin projection that preserves middleware.
+//!
+//! The projection helpers below are a local copy. The shipped implementation
+//! is `tower_agent_mcp::Projection`, which enforces the same two rules and
+//! adds continuation naming. This test cannot use it: `tower-agent-mcp`
+//! depends on this crate, and `scripts/check-core-deps.sh` keeps the core
+//! free of interface crates.
+//!
+//! Both are kept until `TurnTool` lands, at which point this test moves into
+//! `tower-agent-mcp` and the copy goes away. Change one, change the other.
+
 use serde::Deserialize;
 use std::time::Duration;
 

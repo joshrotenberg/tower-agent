@@ -48,8 +48,10 @@
 #![deny(missing_docs)]
 
 mod continuation;
+mod projection;
 
 pub use continuation::{
     ContinuationError, ContinuationId, ContinuationStore, DEFAULT_CAPACITY,
     InMemoryContinuationStore, InvalidContinuationId, Scope, StoreFuture,
 };
+pub use projection::{Projection, ProviderMessages};
