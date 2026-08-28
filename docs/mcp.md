@@ -162,11 +162,19 @@ to turn it off.
 Three things fit the existing kernel more exactly than a projection usually
 does, which is the main evidence that MCP is a reasonable first interface.
 
-**Cancellation is the same type.** `tower_mcp::Context::cancellation_token`
-and `CallContext::with_cancellation` are both
-`tokio_util::sync::CancellationToken`. An MCP `notifications/cancelled` drives
-the existing deadline-and-drain path with no bridging, including the guarantee
-that the adapter waits for settlement rather than dropping the provider future.
+**Cancellation bridges cleanly, but it does not share a type.** An earlier
+draft of this record claimed `tower_mcp::Context::cancellation_token` and
+`CallContext::with_cancellation` were both `tokio_util::sync::CancellationToken`
+and needed no bridging. That is wrong. `tower_mcp::CancellationToken` is a
+newtype that wraps a `tokio_util` token and keeps it private, so the two cannot
+be shared and the adapter forwards one to the other.
+
+The forwarding matters more than the type does. It signals the turn and then
+keeps awaiting it, so the provider future is never dropped and its terminal
+result and evidence still arrive. That is the same guarantee `DeadlineLayer`
+gives, and it is the reason a cancelled tool call still reports what the turn
+spent. The forwarding branch is disabled once it fires, because an
+already-cancelled token completes immediately and would otherwise spin.
 
 **Events fit progress.** `AgentEvent` maps to
 `Context::report_progress_sync`. Both are nonblocking by contract and both drop
@@ -205,6 +213,8 @@ Unfiled. The intended order:
    `crates/tower-agent-mcp`. The composition test keeps a local copy until
    step 3 moves it, because the core cannot depend on an interface crate.
 3. `TurnTool`, including continuation input and continuation-on-failure.
+   Implemented in `crates/tower-agent-mcp`, which is also where the
+   composition test now lives.
 4. Progress events.
 5. `PlanTool` behind a feature, once the turn projection is stable.
 
