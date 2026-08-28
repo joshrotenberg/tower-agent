@@ -76,6 +76,8 @@ jobs:
           -p tower-agent-claude
           -p tower-agent-codex
           -p tower-agent-workflow
+          -p tower-agent-plan
+          -p tower-agent-mcp
           --allow-dirty --locked --no-verify
 
       # --all-targets only builds examples, so an example can carry a wrong

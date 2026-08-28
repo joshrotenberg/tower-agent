@@ -2,7 +2,6 @@
 name = "tower-agent-plan"
 readme = "README.md"
 description = "Layered planning vocabulary and resolver for tower-agent turns"
-publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
