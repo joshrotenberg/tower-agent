@@ -141,6 +141,12 @@ repeat. `docs/resilience.md` governs replay and nothing here changes it. The
 schema states this in words rather than relying on the field names, because the
 inference is natural and wrong.
 
+The projection also carries `replaySafe`, which is true only when `effects` is
+`none`. That is the rule from `docs/resilience.md` in machine-readable form,
+placed next to the continuation id precisely because that is where the wrong
+inference gets made. It describes the turn. The continuation describes the
+conversation.
+
 ## Redaction
 
 Collapsing provider messages is safe and costs the user the actual error. The
@@ -195,7 +201,9 @@ Unfiled. The intended order:
 1. `ContinuationStore`, the id type, and the scope check, with the session
    boundary tested before any transport exists. Implemented in
    `crates/tower-agent-mcp`.
-2. The projection module, extracted from the composition test.
+2. The projection module, extracted from the composition test. Implemented in
+   `crates/tower-agent-mcp`. The composition test keeps a local copy until
+   step 3 moves it, because the core cannot depend on an interface crate.
 3. `TurnTool`, including continuation input and continuation-on-failure.
 4. Progress events.
 5. `PlanTool` behind a feature, once the turn projection is stable.
