@@ -399,3 +399,80 @@ async fn a_store_failure_costs_resumability_and_not_the_turn() {
         serde_json::Value::Null
     );
 }
+
+/// A provider that reports observations while it runs.
+fn talkative_provider() -> BoxTurnService {
+    BoxTurnService::new(service_fn(|request: AgentRequest<Turn>| async move {
+        let events = request.context.events();
+        let _ = events.try_emit(tower_agent::AgentEvent::Started);
+        let _ = events.try_emit(tower_agent::AgentEvent::Status {
+            message: PRIVATE.to_string(),
+        });
+        let _ = events.try_emit(tower_agent::AgentEvent::TurnStarted { number: 2 });
+        Ok::<_, AgentError>(TurnOutcome::new(request.body.prompt))
+    }))
+}
+
+fn observing_context() -> (
+    tower_mcp::RequestContext,
+    tokio::sync::mpsc::Receiver<tower_mcp::ServerNotification>,
+) {
+    let (tx, rx) = tower_mcp::context::notification_channel(16);
+    let context = tower_mcp::RequestContext::new(tower_mcp::protocol::RequestId::Number(1))
+        .with_progress_token(tower_mcp::protocol::ProgressToken::Number(7))
+        .with_notification_sender(tx);
+    (context, rx)
+}
+
+fn progress_messages(
+    rx: &mut tokio::sync::mpsc::Receiver<tower_mcp::ServerNotification>,
+) -> Vec<String> {
+    let mut messages = Vec::new();
+    while let Ok(notification) = rx.try_recv() {
+        if let tower_mcp::ServerNotification::Progress(params) = notification {
+            messages.push(params.message.unwrap_or_default());
+        }
+    }
+    messages
+}
+
+#[tokio::test]
+async fn a_turns_events_reach_the_client_as_progress() {
+    let tool = TurnTool::new(
+        talkative_provider(),
+        Arc::new(InMemoryContinuationStore::new()),
+        Arc::new(FixedScope::stdio()),
+    )
+    .build();
+    let (context, mut rx) = observing_context();
+
+    let result = tool
+        .call_with_context(context, serde_json::json!({ "prompt": "hello" }))
+        .await;
+
+    assert!(!result.is_error);
+    let messages = progress_messages(&mut rx);
+    assert_eq!(messages, vec!["started", "status", "turn 2"]);
+    // The provider put a session value in its status message, and progress is
+    // a second door to the same client.
+    assert!(!messages.join(" ").contains(PRIVATE));
+}
+
+#[tokio::test]
+async fn progress_follows_the_projection_policy_rather_than_its_own() {
+    let tool = TurnTool::new(
+        talkative_provider(),
+        Arc::new(InMemoryContinuationStore::new()),
+        Arc::new(FixedScope::stdio()),
+    )
+    .with_projection(Projection::new().with_provider_messages(ProviderMessages::Verbatim))
+    .build();
+    let (context, mut rx) = observing_context();
+
+    tool.call_with_context(context, serde_json::json!({ "prompt": "hello" }))
+        .await;
+
+    // One knob governs both doors. Opting in to provider text opens it here
+    // too, which is the point of not giving progress its own policy.
+    assert!(progress_messages(&mut rx).join(" ").contains(PRIVATE));
+}

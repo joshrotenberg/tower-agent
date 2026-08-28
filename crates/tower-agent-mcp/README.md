@@ -59,9 +59,13 @@ cargo run -p tower-agent-mcp --example stdio_server
 
 ## Status
 
-Unpublished workspace crate, through step three of the record: the continuation
-store, the projection, and the turn tool. Progress reporting is next, and until
-it lands a turn reports only its terminal result.
+Unpublished workspace crate, through step four of the record: the continuation
+store, the projection, the turn tool, and progress reporting. A planning tool
+behind a feature is the remaining step.
+
+Progress indicates liveness, not content, and obeys the projection's redaction
+policy rather than its own, because a notification reaches the same client the
+result does.
 
 `InMemoryContinuationStore` is the default for a host that has not chosen
 otherwise. It is bounded and does not survive a restart.

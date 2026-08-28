@@ -58,6 +58,12 @@ impl Projection {
         self
     }
 
+    /// Whether this projection publishes provider-authored text.
+    #[must_use]
+    pub fn provider_messages(&self) -> ProviderMessages {
+        self.provider_messages
+    }
+
     /// The failure text this projection is willing to publish.
     #[must_use]
     pub fn message(&self, error: &AgentError) -> String {
