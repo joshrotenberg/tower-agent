@@ -68,6 +68,11 @@ underneath them and their responses are never written. With more than one
 request outstanding the shutdown can also panic with `JoinHandle polled after
 completion`.
 
+`StdioTransport` does not have the problem, because it awaits each dispatch
+inline. The spawn is what the bidirectional transport needs to avoid
+deadlocking elicitation, so the fix belongs upstream rather than here:
+joshrotenberg/tower-mcp#1437.
+
 Real MCP clients keep stdin open for the life of the session, so this does not
 affect normal use. It does affect scripted testing, and it is why the test
 below reads each response before closing its side of the pipe.
