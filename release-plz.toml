@@ -69,3 +69,7 @@ name = "tower-agent-mcp"
 version_group = "tower-agent"
 release = true
 publish = true
+
+[[package]]
+name = "mcp-server-example"
+release = false
